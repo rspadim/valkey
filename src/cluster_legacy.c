@@ -7660,7 +7660,7 @@ int verifyClusterConfigWithData(void) {
 
 /* Remove all the shard channel related information not owned by the current shard. */
 static inline void removeAllNotOwnedShardChannelSubscriptions(void) {
-    if (!kvstoreSize(server.pubsubshard_channels)) return;
+    if (!kvstoreSize(server.pubsubshard_channels) && !kvstoreSize(server.pubsub_conflated_shard_channels)) return;
     clusterNode *cur_primary = clusterNodeIsPrimary(myself) ? myself : myself->replicaof;
     for (int j = 0; j < CLUSTER_SLOTS; j++) {
         if (server.cluster->slots[j] != cur_primary) {
@@ -8316,9 +8316,12 @@ sds genClusterInfoString(sds info) {
 
 
 void removeChannelsInSlot(unsigned int slot) {
-    if (countChannelsInSlot(slot) == 0) return;
-
-    pubsubShardUnsubscribeAllChannelsInSlot(slot);
+    if (kvstoreHashtableSize(server.pubsubshard_channels, slot)) {
+        pubsubShardUnsubscribeAllChannelsInSlot(slot);
+    }
+    if (kvstoreHashtableSize(server.pubsub_conflated_shard_channels, slot)) {
+        pubsubConflatedShardUnsubscribeAllChannelsInSlot(slot);
+    }
 }
 
 /* Remove all the keys in the specified hash slot.

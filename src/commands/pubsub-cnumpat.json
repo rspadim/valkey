@@ -1,0 +1,24 @@
+{
+    "CNUMPAT": {
+        "summary": "Returns the number of conflated pattern subscriptions.",
+        "complexity": "O(N) where N is the number of conflated patterns.",
+        "group": "pubsub",
+        "since": "9.2.0",
+        "arity": 2,
+        "container": "PUBSUB",
+        "function": "pubsubCommand",
+        "command_flags": [
+            "PUBSUB",
+            "LOADING",
+            "STALE"
+        ],
+        "reply_schema": {
+            "description": "The number of conflated pattern subscriptions.",
+            "type": "integer"
+        },
+        "acl_categories": [
+            "PUBSUB",
+            "SLOW"
+        ]
+    }
+}

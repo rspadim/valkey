@@ -218,7 +218,7 @@ start_server {tags {"cli logreqres:skip"}} {
         run_command $fd "hello 2"
 
         # Command forbidden in subscribed mode (RESP2).
-        set err "(error) ERR Can't execute 'get': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context\n"
+        set err "(error) ERR Can't execute 'get': only (P|C|S)SUBSCRIBE / (P|C|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context\n"
         assert_equal $erase$err$reading [run_command $fd "get k"]
 
         # Command allowed in subscribed mode.

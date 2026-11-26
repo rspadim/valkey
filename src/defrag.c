@@ -240,6 +240,15 @@ robj *activeDefragStringOb(robj *ob) {
     return new_robj;
 }
 
+/* Defrag the SDS payload of a string object in place. The robj itself may be
+ * shared by several indexes, but the SDS pointer is updated in the shared
+ * object, so every reference sees the relocation. */
+void defragStringObjectSds(robj *ob) {
+    if (ob == NULL || ob->type != OBJ_STRING || ob->encoding != OBJ_ENCODING_RAW) return;
+    sds newsds = activeDefragSds((sds)objectGetVal(ob));
+    if (newsds) objectSetVal(ob, newsds);
+}
+
 /* Callback for orderedIndexScanDefrag — when a packed member item is
  * relocated, update the companion hashtable's pointer to it. */
 static void defragZsetItemCallback(OrderedIndexItem *old_item, OrderedIndexItem *new_item, void *privdata) {
@@ -965,6 +974,45 @@ static doneStatus defragStagePubsubKvstore(monotime endtime, void *target, void 
                                     defragPubsubScanCallback, NULL, &ctx);
 }
 
+/* Defrag the conflated shard server index and each subscriber's shard table.
+ * The channel names and payloads are shared, so they stay in place. */
+static void defragConflatedShardScanCallback(void *privdata, void *elemref) {
+    UNUSED(privdata);
+    hashtable **clients_ref = elemref;
+    hashtable *clients = *clients_ref;
+    defragStringObjectSds(*(robj **)hashtableMetadata(clients));
+
+    hashtable *newclients = hashtableDefragTables(clients, activeDefragAlloc);
+    if (newclients) *clients_ref = newclients;
+
+    /* Per-subscriber shard tables are defragged once by
+     * pubsubDefragConflatedClient, not once per channel here. */
+    server.stat_active_defrag_scanned++;
+}
+
+/* Defrag the conflated exact/pattern tables. The channel/pattern name objects
+ * and payloads are shared by multiple indexes, so they are not relocated here;
+ * this stage compacts the hashtable allocations and the per-client pattern
+ * channel tables. */
+static doneStatus defragStageConflatedShardKvstore(monotime endtime, void *target, void *privdata) {
+    return defragStageKvstoreHelper(endtime, (kvstore *)target, defragConflatedShardScanCallback, NULL, privdata);
+}
+
+static doneStatus defragStageConflatedPubsub(monotime endtime, void *target, void *privdata) {
+    UNUSED(target);
+    UNUSED(privdata);
+    if (endtime == 0) return DEFRAG_NOT_DONE; /* required initialization */
+
+    pubsubDefragConflatedServer();
+    listIter li;
+    listNode *ln;
+    listRewind(server.clients, &li);
+    while ((ln = listNext(&li)) != NULL) {
+        pubsubDefragConflatedClient(listNodeValue(ln));
+    }
+    return DEFRAG_DONE;
+}
+
 
 static doneStatus defragLuaScripts(monotime endtime, void *target, void *privdata) {
     UNUSED(target);
@@ -1240,6 +1288,8 @@ static void beginDefragCycle(void) {
     static getClientChannelsFnWrapper getClientPubSubShardChannelsFn = {getClientPubSubShardChannels};
     addDefragStage(defragStagePubsubKvstore, server.pubsub_channels, &getClientPubSubChannelsFn);
     addDefragStage(defragStagePubsubKvstore, server.pubsubshard_channels, &getClientPubSubShardChannelsFn);
+    addDefragStage(defragStageConflatedShardKvstore, server.pubsub_conflated_shard_channels, NULL);
+    addDefragStage(defragStageConflatedPubsub, NULL, NULL);
 
     addDefragStage(defragLuaScripts, NULL, NULL);
     addDefragStage(defragModuleGlobals, NULL, NULL);

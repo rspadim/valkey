@@ -97,6 +97,11 @@ configEnum supervised_mode_enum[] = {
     {"no", SUPERVISED_NONE},
     {NULL, 0}};
 
+configEnum conflated_overflow_enum[] = {
+    {"drop_newest", PUBSUB_CONFLATED_DROP_NEWEST},
+    {"drop_oldest", PUBSUB_CONFLATED_DROP_OLDEST},
+    {NULL, 0}};
+
 configEnum aof_fsync_enum[] = {
     {"everysec", AOF_FSYNC_EVERYSEC},
     {"always", AOF_FSYNC_ALWAYS},
@@ -773,7 +778,19 @@ static int performInterfaceSet(standardConfig *config, sds value, const char **e
     sds *argv;
     int argc, res;
 
-    if (config->flags & MULTI_ARG_CONFIG) {
+    if (config->flags & MULTI_ARG_QUOTED_CONFIG) {
+        if (sdslen(value) == 0) {
+            argv = NULL;
+            argc = 0;
+        } else {
+            argv = sdssplitargs(value, &argc);
+            if (argv == NULL || argc == 0) {
+                if (argv) sdsfreesplitres(argv, argc);
+                *errstr = "Invalid quoted argument(s)";
+                return 0;
+            }
+        }
+    } else if (config->flags & MULTI_ARG_CONFIG) {
         argv = sdssplitlen(value, sdslen(value), " ", 1, &argc);
     } else {
         argv = (char **)&value;
@@ -782,7 +799,7 @@ static int performInterfaceSet(standardConfig *config, sds value, const char **e
 
     /* Set the config */
     res = config->interface.set(config, argv, argc, errstr);
-    if (config->flags & MULTI_ARG_CONFIG) sdsfreesplitres(argv, argc);
+    if ((config->flags & (MULTI_ARG_CONFIG | MULTI_ARG_QUOTED_CONFIG)) && argv) sdsfreesplitres(argv, argc);
     return res;
 }
 
@@ -1534,6 +1551,101 @@ void rewriteConfigSaveOption(standardConfig *config, const char *name, struct re
 
     /* Mark "save" as processed in case server.saveparamslen is zero. */
     rewriteConfigMarkAsProcessed(state, name);
+}
+
+static void freeConflatedAutoRules(void) {
+    listIter li;
+    listNode *ln;
+    listRewind(server.pubsub_conflated_auto_rules, &li);
+    while ((ln = listNext(&li)) != NULL) {
+        conflatedAutoRule *rule = listNodeValue(ln);
+        sdsfree(rule->user);
+        sdsfree(rule->pattern);
+        zfree(rule);
+    }
+    listEmpty(server.pubsub_conflated_auto_rules);
+}
+
+/* conflated-pubsub-auto <user|*> <subscription-pattern> <interval-ms>
+ *
+ * A config file may repeat the line; each line appends a rule (the first line
+ * resets the table for this load). CONFIG SET replaces the table with the
+ * space-separated triples in one value; an empty value clears it. */
+static int setConfigConflatedAutoOption(standardConfig *config, sds *argv, int argc, const char **err) {
+    UNUSED(config);
+    if (argc == 1 && !strcasecmp(argv[0], "")) argc = 0;
+    if (argc % 3 != 0) {
+        *err = "Invalid conflated-pubsub-auto rule: expected <user> <pattern> <interval-ms>";
+        return 0;
+    }
+    for (int j = 0; j < argc; j += 3) {
+        if (argv[j][0] == '\0' || argv[j + 1][0] == '\0') {
+            *err = "Invalid conflated-pubsub-auto rule: empty user or pattern";
+            return 0;
+        }
+        char *end = NULL;
+        long long interval = strtoll(argv[j + 2], &end, 10);
+        if (end == argv[j + 2] || *end != '\0' || interval < 0 || interval > INT_MAX) {
+            *err = "Invalid conflated-pubsub-auto interval";
+            return 0;
+        }
+    }
+
+    if (!reading_config_file) {
+        freeConflatedAutoRules();
+    } else {
+        static int loaded = 0;
+        if (!loaded) {
+            loaded = 1;
+            freeConflatedAutoRules();
+        }
+    }
+    for (int j = 0; j < argc; j += 3) {
+        conflatedAutoRule *rule = zmalloc(sizeof(*rule));
+        rule->user = sdsnew(argv[j]);
+        rule->pattern = sdsnew(argv[j + 1]);
+        rule->interval_ms = strtoll(argv[j + 2], NULL, 10);
+        listAddNodeTail(server.pubsub_conflated_auto_rules, rule);
+    }
+    return 1;
+}
+
+static sds getConfigConflatedAutoOption(standardConfig *config) {
+    UNUSED(config);
+    sds buf = sdsempty();
+    listIter li;
+    listNode *ln;
+    listRewind(server.pubsub_conflated_auto_rules, &li);
+    while ((ln = listNext(&li)) != NULL) {
+        conflatedAutoRule *rule = listNodeValue(ln);
+        if (sdslen(buf)) buf = sdscatlen(buf, " ", 1);
+        buf = sdscatrepr(buf, rule->user, sdslen(rule->user));
+        buf = sdscatlen(buf, " ", 1);
+        buf = sdscatrepr(buf, rule->pattern, sdslen(rule->pattern));
+        buf = sdscatprintf(buf, " %lld", rule->interval_ms);
+    }
+    return buf;
+}
+
+static void rewriteConfigConflatedAutoOption(standardConfig *config, const char *name,
+                                             struct rewriteConfigState *state) {
+    UNUSED(config);
+    if (listLength(server.pubsub_conflated_auto_rules) == 0) {
+        rewriteConfigRewriteLine(state, name, sdscatprintf(sdsempty(), "%s \"\"", name), 1);
+        return;
+    }
+    listIter li;
+    listNode *ln;
+    listRewind(server.pubsub_conflated_auto_rules, &li);
+    while ((ln = listNext(&li)) != NULL) {
+        conflatedAutoRule *rule = listNodeValue(ln);
+        sds line = sdscatprintf(sdsempty(), "%s ", name);
+        line = sdscatrepr(line, rule->user, sdslen(rule->user));
+        line = sdscatlen(line, " ", 1);
+        line = sdscatrepr(line, rule->pattern, sdslen(rule->pattern));
+        line = sdscatprintf(line, " %lld", rule->interval_ms);
+        rewriteConfigRewriteLine(state, name, line, 1);
+    }
 }
 
 /* Rewrite the user or role option. */
@@ -2739,6 +2851,12 @@ static int updateDefragConfiguration(const char **err) {
     return 1;
 }
 
+static int updateConflatedIntervalConfig(const char **err) {
+    UNUSED(err);
+    pubsubConflatedReschedule();
+    return 1;
+}
+
 /* Dynamic configuration apply callback for priority-preemptive-poll-interval-us.
  * Updates the preemption threshold on the active event loop. */
 static int updatePriorityPreemptivePollInterval(const char **err) {
@@ -3660,6 +3778,15 @@ standardConfig static_configs[] = {
     createLongLongConfig("commandlog-reply-larger-than", NULL, MODIFIABLE_CONFIG, -1, LLONG_MAX, server.commandlog[COMMANDLOG_TYPE_LARGE_REPLY].threshold, 1024 * 1024, MEMORY_CONFIG | SIGNED_MEMORY_CONFIG, NULL, NULL),
     createLongLongConfig("latency-monitor-threshold", NULL, MODIFIABLE_CONFIG, 0, LLONG_MAX, server.latency_monitor_threshold, 0, INTEGER_CONFIG, NULL, NULL),
     createLongLongConfig("proto-max-bulk-len", NULL, DEBUG_CONFIG | MODIFIABLE_CONFIG, 1024 * 1024, LONG_MAX, server.proto_max_bulk_len, 512ll * 1024 * 1024, MEMORY_CONFIG, NULL, NULL), /* Bulk request max size */
+    createIntConfig("conflated-pubsub-interval-ms", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.pubsub_conflated_interval_ms, 0, INTEGER_CONFIG, NULL, updateConflatedIntervalConfig), /* Conflated delivery interval; 0 disables conflation. */
+    createStringConfig("conflated-pubsub-auto-users", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.pubsub_conflated_auto_users, NULL, NULL, NULL),     /* Users whose plain subscriptions are conflated. */
+    createStringConfig("conflated-pubsub-auto-patterns", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.pubsub_conflated_auto_patterns, NULL, NULL, NULL), /* Subscription patterns auto-conflated. */
+    createIntConfig("conflated-pubsub-max-pending-bytes", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.pubsub_conflated_max_pending_bytes, 64 * 1024 * 1024, MEMORY_CONFIG, NULL, NULL),
+    createIntConfig("conflated-pubsub-max-total-pending-bytes", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.pubsub_conflated_max_total_pending_bytes, 256 * 1024 * 1024, MEMORY_CONFIG, NULL, NULL),
+    createIntConfig("conflated-pubsub-max-pending-keys", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.pubsub_conflated_max_pending_keys, 100000, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("conflated-pubsub-max-total-pending-keys", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.pubsub_conflated_max_total_pending_keys, 1000000, INTEGER_CONFIG, NULL, NULL),
+    createEnumConfig("conflated-pubsub-overflow-policy", NULL, MODIFIABLE_CONFIG, conflated_overflow_enum, server.pubsub_conflated_overflow_policy, PUBSUB_CONFLATED_DROP_NEWEST, NULL, NULL),
+    createIntConfig("conflated-pubsub-flush-budget", NULL, MODIFIABLE_CONFIG, 1, INT_MAX, server.pubsub_conflated_flush_budget, 4096, INTEGER_CONFIG, NULL, NULL),
     createLongLongConfig("stream-node-max-entries", NULL, MODIFIABLE_CONFIG, 0, LLONG_MAX, server.stream_node_max_entries, 100, INTEGER_CONFIG, NULL, NULL),
     createLongLongConfig("repl-backlog-size", NULL, MODIFIABLE_CONFIG, 1, LLONG_MAX, server.repl_backlog_size, 10 * 1024 * 1024, MEMORY_CONFIG, NULL, updateReplBacklogSize), /* Default: 10mb */
     createLongLongConfig("cluster-manual-failover-timeout", NULL, MODIFIABLE_CONFIG, 1, INT_MAX, server.cluster_mf_timeout, 5000, INTEGER_CONFIG, NULL, NULL),
@@ -3720,6 +3847,7 @@ standardConfig static_configs[] = {
     /* Special configs */
     createSpecialConfig("dir", NULL, MODIFIABLE_CONFIG | PROTECTED_CONFIG | DENY_LOADING_CONFIG, setConfigDirOption, getConfigDirOption, rewriteConfigDirOption, NULL),
     createSpecialConfig("save", NULL, MODIFIABLE_CONFIG | MULTI_ARG_CONFIG, setConfigSaveOption, getConfigSaveOption, rewriteConfigSaveOption, NULL),
+    createSpecialConfig("conflated-pubsub-auto", NULL, MODIFIABLE_CONFIG | MULTI_ARG_CONFIG | MULTI_ARG_QUOTED_CONFIG, setConfigConflatedAutoOption, getConfigConflatedAutoOption, rewriteConfigConflatedAutoOption, NULL),
     createSpecialConfig("client-output-buffer-limit", NULL, MODIFIABLE_CONFIG | MULTI_ARG_CONFIG, setConfigClientOutputBufferLimitOption, getConfigClientOutputBufferLimitOption, rewriteConfigClientOutputBufferLimitOption, NULL),
     createSpecialConfig("oom-score-adj-values", NULL, MODIFIABLE_CONFIG | MULTI_ARG_CONFIG, setConfigOOMScoreAdjValuesOption, getConfigOOMScoreAdjValuesOption, rewriteConfigOOMScoreAdjValuesOption, updateOOMScoreAdj),
     createSpecialConfig("notify-keyspace-events", NULL, MODIFIABLE_CONFIG, setConfigNotifyKeyspaceEventsOption, getConfigNotifyKeyspaceEventsOption, rewriteConfigNotifyKeyspaceEventsOption, NULL),

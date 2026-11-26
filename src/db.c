@@ -2600,8 +2600,13 @@ typedef struct ChannelSpecs {
 
 ChannelSpecs commands_with_channels[] = {
     {subscribeCommand, CMD_CHANNEL_SUBSCRIBE, 1, -1},
+    {csubscribeCommand, CMD_CHANNEL_SUBSCRIBE, 1, -1},
+    {cpsubscribeCommand, CMD_CHANNEL_PATTERN | CMD_CHANNEL_SUBSCRIBE, 1, -1},
+    {cssubscribeCommand, CMD_CHANNEL_SUBSCRIBE, 1, -1},
     {ssubscribeCommand, CMD_CHANNEL_SUBSCRIBE, 1, -1},
     {unsubscribeCommand, CMD_CHANNEL_UNSUBSCRIBE, 1, -1},
+    {cunsubscribeCommand, CMD_CHANNEL_UNSUBSCRIBE, 1, -1},
+    {cpunsubscribeCommand, CMD_CHANNEL_PATTERN | CMD_CHANNEL_UNSUBSCRIBE, 1, -1},
     {sunsubscribeCommand, CMD_CHANNEL_UNSUBSCRIBE, 1, -1},
     {psubscribeCommand, CMD_CHANNEL_PATTERN | CMD_CHANNEL_SUBSCRIBE, 1, -1},
     {punsubscribeCommand, CMD_CHANNEL_PATTERN | CMD_CHANNEL_UNSUBSCRIBE, 1, -1},

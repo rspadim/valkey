@@ -1,0 +1,47 @@
+{
+    "CSUNSUBSCRIBE": {
+        "summary": "Stops listening to messages posted to shard channels with conflation.",
+        "complexity": "O(N) where N is the number of shard channels to unsubscribe.",
+        "group": "pubsub",
+        "since": "9.2.0",
+        "arity": -1,
+        "function": "csunsubscribeCommand",
+        "command_flags": [
+            "PUBSUB",
+            "NOSCRIPT",
+            "LOADING",
+            "STALE"
+        ],
+        "arguments": [
+            {
+                "name": "shardchannel",
+                "type": "string",
+                "optional": true,
+                "multiple": true
+            }
+        ],
+        "key_specs": [
+            {
+                "flags": [
+                    "NOT_KEY"
+                ],
+                "begin_search": {
+                    "index": {
+                        "pos": 1
+                    }
+                },
+                "find_keys": {
+                    "range": {
+                        "lastkey": -1,
+                        "step": 1,
+                        "limit": 0
+                    }
+                }
+            }
+        ],
+        "acl_categories": [
+            "PUBSUB",
+            "SLOW"
+        ]
+    }
+}

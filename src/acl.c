@@ -2621,6 +2621,21 @@ static list *getUpcomingChannelList(user *new, user *original) {
     return upcoming;
 }
 
+/* Check one conflated index (exact/pattern/shard) against the upcoming
+ * channel list. */
+static int ACLShouldKillConflatedIndex(client *c, list *upcoming, dict *index, int pattern) {
+    dictIterator *di = dictGetIterator(index);
+    dictEntry *de;
+    int kill = 0;
+    while (!kill && (de = dictNext(di)) != NULL) {
+        robj *o = dictGetKey(de);
+        int res = ACLCheckChannelAgainstList(upcoming, objectGetVal(o), sdslen(objectGetVal(o)), pattern);
+        kill = (res == ACL_DENIED_CHANNEL);
+    }
+    dictReleaseIterator(di);
+    return kill;
+}
+
 /* Check if the client should be killed because it is subscribed to channels that were
  * permitted in the past, are not in the `upcoming` channel list. */
 static int ACLShouldKillPubsubClient(client *c, list *upcoming) {
@@ -2662,6 +2677,12 @@ static int ACLShouldKillPubsubClient(client *c, list *upcoming) {
                 kill = (res == ACL_DENIED_CHANNEL);
             }
             hashtableCleanupIterator(&iter);
+        }
+        if (!kill) {
+            /* Check conflated exact/pattern/shard channel violations. */
+            kill = ACLShouldKillConflatedIndex(c, upcoming, c->pubsub_data->conflated_channels, 0) ||
+                   ACLShouldKillConflatedIndex(c, upcoming, c->pubsub_data->conflated_patterns, 1) ||
+                   ACLShouldKillConflatedIndex(c, upcoming, c->pubsub_data->conflated_shard_channels, 0);
         }
 
         if (kill) {

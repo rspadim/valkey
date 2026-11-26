@@ -5748,6 +5748,142 @@ struct COMMAND_ARG PHSET_Args[] = {
 {MAKE_ARG("fields",ARG_TYPE_BLOCK,-1,"FIELDS",NULL,NULL,CMD_ARG_NONE,2,NULL),.subargs=PHSET_fields_Subargs},
 };
 
+/********** CPSUBSCRIBE ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* CPSUBSCRIBE history */
+#define CPSUBSCRIBE_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* CPSUBSCRIBE tips */
+#define CPSUBSCRIBE_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* CPSUBSCRIBE key specs */
+#define CPSUBSCRIBE_Keyspecs NULL
+#endif
+
+/* CPSUBSCRIBE argument table */
+struct COMMAND_ARG CPSUBSCRIBE_Args[] = {
+{MAKE_ARG("pattern",ARG_TYPE_PATTERN,-1,NULL,NULL,NULL,CMD_ARG_MULTIPLE,0,NULL)},
+};
+
+/********** CPUNSUBSCRIBE ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* CPUNSUBSCRIBE history */
+#define CPUNSUBSCRIBE_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* CPUNSUBSCRIBE tips */
+#define CPUNSUBSCRIBE_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* CPUNSUBSCRIBE key specs */
+#define CPUNSUBSCRIBE_Keyspecs NULL
+#endif
+
+/* CPUNSUBSCRIBE argument table */
+struct COMMAND_ARG CPUNSUBSCRIBE_Args[] = {
+{MAKE_ARG("pattern",ARG_TYPE_PATTERN,-1,NULL,NULL,NULL,CMD_ARG_OPTIONAL|CMD_ARG_MULTIPLE,0,NULL)},
+};
+
+/********** CSSUBSCRIBE ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* CSSUBSCRIBE history */
+#define CSSUBSCRIBE_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* CSSUBSCRIBE tips */
+#define CSSUBSCRIBE_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* CSSUBSCRIBE key specs */
+keySpec CSSUBSCRIBE_Keyspecs[1] = {
+{NULL,CMD_KEY_NOT_KEY,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={-1,1,0}}
+};
+#endif
+
+/* CSSUBSCRIBE argument table */
+struct COMMAND_ARG CSSUBSCRIBE_Args[] = {
+{MAKE_ARG("shardchannel",ARG_TYPE_STRING,-1,NULL,NULL,NULL,CMD_ARG_MULTIPLE,0,NULL)},
+};
+
+/********** CSUBSCRIBE ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* CSUBSCRIBE history */
+#define CSUBSCRIBE_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* CSUBSCRIBE tips */
+#define CSUBSCRIBE_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* CSUBSCRIBE key specs */
+#define CSUBSCRIBE_Keyspecs NULL
+#endif
+
+/* CSUBSCRIBE argument table */
+struct COMMAND_ARG CSUBSCRIBE_Args[] = {
+{MAKE_ARG("channel",ARG_TYPE_STRING,-1,NULL,NULL,NULL,CMD_ARG_MULTIPLE,0,NULL)},
+};
+
+/********** CSUNSUBSCRIBE ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* CSUNSUBSCRIBE history */
+#define CSUNSUBSCRIBE_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* CSUNSUBSCRIBE tips */
+#define CSUNSUBSCRIBE_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* CSUNSUBSCRIBE key specs */
+keySpec CSUNSUBSCRIBE_Keyspecs[1] = {
+{NULL,CMD_KEY_NOT_KEY,KSPEC_BS_INDEX,.bs.index={1},KSPEC_FK_RANGE,.fk.range={-1,1,0}}
+};
+#endif
+
+/* CSUNSUBSCRIBE argument table */
+struct COMMAND_ARG CSUNSUBSCRIBE_Args[] = {
+{MAKE_ARG("shardchannel",ARG_TYPE_STRING,-1,NULL,NULL,NULL,CMD_ARG_OPTIONAL|CMD_ARG_MULTIPLE,0,NULL)},
+};
+
+/********** CUNSUBSCRIBE ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* CUNSUBSCRIBE history */
+#define CUNSUBSCRIBE_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* CUNSUBSCRIBE tips */
+#define CUNSUBSCRIBE_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* CUNSUBSCRIBE key specs */
+#define CUNSUBSCRIBE_Keyspecs NULL
+#endif
+
+/* CUNSUBSCRIBE argument table */
+struct COMMAND_ARG CUNSUBSCRIBE_Args[] = {
+{MAKE_ARG("channel",ARG_TYPE_STRING,-1,NULL,NULL,NULL,CMD_ARG_OPTIONAL|CMD_ARG_MULTIPLE,0,NULL)},
+};
+
 /********** PSUBSCRIBE ********************/
 
 #ifndef SKIP_CMD_HISTORY_TABLE
@@ -5793,6 +5929,28 @@ struct COMMAND_ARG PUBLISH_Args[] = {
 {MAKE_ARG("message",ARG_TYPE_STRING,-1,NULL,NULL,NULL,CMD_ARG_NONE,0,NULL)},
 };
 
+/********** PUBSUB CCHANNELS ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* PUBSUB CCHANNELS history */
+#define PUBSUB_CCHANNELS_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* PUBSUB CCHANNELS tips */
+#define PUBSUB_CCHANNELS_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* PUBSUB CCHANNELS key specs */
+#define PUBSUB_CCHANNELS_Keyspecs NULL
+#endif
+
+/* PUBSUB CCHANNELS argument table */
+struct COMMAND_ARG PUBSUB_CCHANNELS_Args[] = {
+{MAKE_ARG("pattern",ARG_TYPE_PATTERN,-1,NULL,NULL,NULL,CMD_ARG_OPTIONAL,0,NULL)},
+};
+
 /********** PUBSUB CHANNELS ********************/
 
 #ifndef SKIP_CMD_HISTORY_TABLE
@@ -5813,6 +5971,106 @@ struct COMMAND_ARG PUBLISH_Args[] = {
 /* PUBSUB CHANNELS argument table */
 struct COMMAND_ARG PUBSUB_CHANNELS_Args[] = {
 {MAKE_ARG("pattern",ARG_TYPE_PATTERN,-1,NULL,NULL,NULL,CMD_ARG_OPTIONAL,0,NULL)},
+};
+
+/********** PUBSUB CNUMPAT ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* PUBSUB CNUMPAT history */
+#define PUBSUB_CNUMPAT_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* PUBSUB CNUMPAT tips */
+#define PUBSUB_CNUMPAT_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* PUBSUB CNUMPAT key specs */
+#define PUBSUB_CNUMPAT_Keyspecs NULL
+#endif
+
+/********** PUBSUB CNUMSUB ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* PUBSUB CNUMSUB history */
+#define PUBSUB_CNUMSUB_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* PUBSUB CNUMSUB tips */
+#define PUBSUB_CNUMSUB_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* PUBSUB CNUMSUB key specs */
+#define PUBSUB_CNUMSUB_Keyspecs NULL
+#endif
+
+/* PUBSUB CNUMSUB argument table */
+struct COMMAND_ARG PUBSUB_CNUMSUB_Args[] = {
+{MAKE_ARG("channel",ARG_TYPE_STRING,-1,NULL,NULL,NULL,CMD_ARG_OPTIONAL|CMD_ARG_MULTIPLE,0,NULL)},
+};
+
+/********** PUBSUB CONFLATED ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* PUBSUB CONFLATED history */
+#define PUBSUB_CONFLATED_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* PUBSUB CONFLATED tips */
+#define PUBSUB_CONFLATED_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* PUBSUB CONFLATED key specs */
+#define PUBSUB_CONFLATED_Keyspecs NULL
+#endif
+
+/********** PUBSUB CSHARDCHANNELS ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* PUBSUB CSHARDCHANNELS history */
+#define PUBSUB_CSHARDCHANNELS_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* PUBSUB CSHARDCHANNELS tips */
+#define PUBSUB_CSHARDCHANNELS_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* PUBSUB CSHARDCHANNELS key specs */
+#define PUBSUB_CSHARDCHANNELS_Keyspecs NULL
+#endif
+
+/* PUBSUB CSHARDCHANNELS argument table */
+struct COMMAND_ARG PUBSUB_CSHARDCHANNELS_Args[] = {
+{MAKE_ARG("pattern",ARG_TYPE_PATTERN,-1,NULL,NULL,NULL,CMD_ARG_OPTIONAL,0,NULL)},
+};
+
+/********** PUBSUB CSHARDNUMSUB ********************/
+
+#ifndef SKIP_CMD_HISTORY_TABLE
+/* PUBSUB CSHARDNUMSUB history */
+#define PUBSUB_CSHARDNUMSUB_History NULL
+#endif
+
+#ifndef SKIP_CMD_TIPS_TABLE
+/* PUBSUB CSHARDNUMSUB tips */
+#define PUBSUB_CSHARDNUMSUB_Tips NULL
+#endif
+
+#ifndef SKIP_CMD_KEY_SPECS_TABLE
+/* PUBSUB CSHARDNUMSUB key specs */
+#define PUBSUB_CSHARDNUMSUB_Keyspecs NULL
+#endif
+
+/* PUBSUB CSHARDNUMSUB argument table */
+struct COMMAND_ARG PUBSUB_CSHARDNUMSUB_Args[] = {
+{MAKE_ARG("shardchannel",ARG_TYPE_STRING,-1,NULL,NULL,NULL,CMD_ARG_OPTIONAL|CMD_ARG_MULTIPLE,0,NULL)},
 };
 
 /********** PUBSUB HELP ********************/
@@ -5917,7 +6175,13 @@ struct COMMAND_ARG PUBSUB_SHARDNUMSUB_Args[] = {
 
 /* PUBSUB command table */
 struct COMMAND_STRUCT PUBSUB_Subcommands[] = {
+{MAKE_CMD("cchannels","Returns channels with at least one conflated subscriber.","O(N) where N is the number of active conflated channels.","9.2.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,PUBSUB_CCHANNELS_History,0,PUBSUB_CCHANNELS_Tips,0,pubsubCommand,-2,CMD_PUBSUB|CMD_LOADING|CMD_STALE,ACL_CATEGORY_PUBSUB|ACL_CATEGORY_SLOW,NULL,PUBSUB_CCHANNELS_Keyspecs,0,NULL,1),.args=PUBSUB_CCHANNELS_Args},
 {MAKE_CMD("channels","Returns the active channels.","O(N) where N is the number of active channels, and assuming constant time pattern matching (relatively short channels and patterns)","2.8.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,PUBSUB_CHANNELS_History,0,PUBSUB_CHANNELS_Tips,0,pubsubCommand,-2,CMD_PUBSUB|CMD_LOADING|CMD_STALE,ACL_CATEGORY_PUBSUB|ACL_CATEGORY_SLOW,NULL,PUBSUB_CHANNELS_Keyspecs,0,NULL,1),.args=PUBSUB_CHANNELS_Args},
+{MAKE_CMD("cnumpat","Returns the number of conflated pattern subscriptions.","O(N) where N is the number of conflated patterns.","9.2.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,PUBSUB_CNUMPAT_History,0,PUBSUB_CNUMPAT_Tips,0,pubsubCommand,2,CMD_PUBSUB|CMD_LOADING|CMD_STALE,ACL_CATEGORY_PUBSUB|ACL_CATEGORY_SLOW,NULL,PUBSUB_CNUMPAT_Keyspecs,0,NULL,0)},
+{MAKE_CMD("cnumsub","Returns a count of conflated subscribers to channels.","O(N) where N is the number of requested channels.","9.2.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,PUBSUB_CNUMSUB_History,0,PUBSUB_CNUMSUB_Tips,0,pubsubCommand,-2,CMD_PUBSUB|CMD_LOADING|CMD_STALE,ACL_CATEGORY_PUBSUB|ACL_CATEGORY_SLOW,NULL,PUBSUB_CNUMSUB_Keyspecs,0,NULL,1),.args=PUBSUB_CNUMSUB_Args},
+{MAKE_CMD("conflated","Returns conflated Pub/Sub counters and memory gauges.","O(1)","9.2.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,PUBSUB_CONFLATED_History,0,PUBSUB_CONFLATED_Tips,0,pubsubCommand,2,CMD_PUBSUB|CMD_LOADING|CMD_STALE,ACL_CATEGORY_PUBSUB|ACL_CATEGORY_SLOW,NULL,PUBSUB_CONFLATED_Keyspecs,0,NULL,0)},
+{MAKE_CMD("cshardchannels","Returns the active shard channels with at least one conflated subscriber.","O(N) where N is the number of active conflated shard channels, and assuming constant time pattern matching (relatively short shard channels).","9.2.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,PUBSUB_CSHARDCHANNELS_History,0,PUBSUB_CSHARDCHANNELS_Tips,0,pubsubCommand,-2,CMD_PUBSUB|CMD_LOADING|CMD_STALE,ACL_CATEGORY_PUBSUB|ACL_CATEGORY_SLOW,NULL,PUBSUB_CSHARDCHANNELS_Keyspecs,0,NULL,1),.args=PUBSUB_CSHARDCHANNELS_Args},
+{MAKE_CMD("cshardnumsub","Returns the count of conflated subscribers of shard channels.","O(N) for the CSHARDNUMSUB subcommand, where N is the number of requested shard channels","9.2.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,PUBSUB_CSHARDNUMSUB_History,0,PUBSUB_CSHARDNUMSUB_Tips,0,pubsubCommand,-2,CMD_PUBSUB|CMD_LOADING|CMD_STALE,ACL_CATEGORY_PUBSUB|ACL_CATEGORY_SLOW,NULL,PUBSUB_CSHARDNUMSUB_Keyspecs,0,NULL,1),.args=PUBSUB_CSHARDNUMSUB_Args},
 {MAKE_CMD("help","Returns helpful text about the different subcommands.","O(1)","6.2.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,PUBSUB_HELP_History,0,PUBSUB_HELP_Tips,0,pubsubCommand,2,CMD_LOADING|CMD_STALE,ACL_CATEGORY_SLOW,NULL,PUBSUB_HELP_Keyspecs,0,NULL,0)},
 {MAKE_CMD("numpat","Returns a count of unique pattern subscriptions.","O(1)","2.8.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,PUBSUB_NUMPAT_History,0,PUBSUB_NUMPAT_Tips,0,pubsubCommand,2,CMD_PUBSUB|CMD_LOADING|CMD_STALE,ACL_CATEGORY_PUBSUB|ACL_CATEGORY_SLOW,NULL,PUBSUB_NUMPAT_Keyspecs,0,NULL,0)},
 {MAKE_CMD("numsub","Returns a count of subscribers to channels.","O(N) for the NUMSUB subcommand, where N is the number of requested channels","2.8.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,PUBSUB_NUMSUB_History,0,PUBSUB_NUMSUB_Tips,0,pubsubCommand,-2,CMD_PUBSUB|CMD_LOADING|CMD_STALE,ACL_CATEGORY_PUBSUB|ACL_CATEGORY_SLOW,NULL,PUBSUB_NUMSUB_Keyspecs,0,NULL,1),.args=PUBSUB_NUMSUB_Args},
@@ -12904,6 +13168,12 @@ struct COMMAND_STRUCT serverCommandTable[] = {
 {MAKE_CMD("phscan","Iterates over fields and values at an exact path in a path hash.","O(L) for the path lookup plus the cost of HSCAN on its field map; COUNT is a work hint, not a hard result limit.","9.2.0",CMD_DOC_NONE,NULL,NULL,"pathhash",COMMAND_GROUP_PATH_HASH,PHSCAN_History,0,PHSCAN_Tips,1,phscanCommand,-4,CMD_READONLY,ACL_CATEGORY_PATHHASH|ACL_CATEGORY_READ|ACL_CATEGORY_SLOW,NULL,PHSCAN_Keyspecs,1,NULL,5),.args=PHSCAN_Args},
 {MAKE_CMD("phset","Atomically sets one or more fields at a path in a path hash.","O(L + F*U), where L is the path length, F is the number of fields, and U is the payload field lookup cost.","9.2.0",CMD_DOC_NONE,NULL,NULL,"pathhash",COMMAND_GROUP_PATH_HASH,PHSET_History,0,PHSET_Tips,0,phsetCommand,-7,CMD_WRITE|CMD_DENYOOM|CMD_FAST,ACL_CATEGORY_PATHHASH|ACL_CATEGORY_WRITE|ACL_CATEGORY_FAST,NULL,PHSET_Keyspecs,1,NULL,4),.args=PHSET_Args},
 /* pubsub */
+{MAKE_CMD("cpsubscribe","Listens for messages published to channels matching patterns, delivering only the latest value per channel and interval.","O(N) where N is the number of patterns to subscribe to.","9.2.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,CPSUBSCRIBE_History,0,CPSUBSCRIBE_Tips,0,cpsubscribeCommand,-2,CMD_PUBSUB|CMD_NOSCRIPT|CMD_LOADING|CMD_STALE|CMD_SENTINEL,ACL_CATEGORY_PUBSUB|ACL_CATEGORY_SLOW,NULL,CPSUBSCRIBE_Keyspecs,0,NULL,1),.args=CPSUBSCRIBE_Args},
+{MAKE_CMD("cpunsubscribe","Stops listening to conflated messages posted to channels matching patterns.","O(N) where N is the number of patterns to unsubscribe.","9.2.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,CPUNSUBSCRIBE_History,0,CPUNSUBSCRIBE_Tips,0,cpunsubscribeCommand,-1,CMD_PUBSUB|CMD_NOSCRIPT|CMD_LOADING|CMD_STALE|CMD_SENTINEL,ACL_CATEGORY_PUBSUB|ACL_CATEGORY_SLOW,NULL,CPUNSUBSCRIBE_Keyspecs,0,NULL,1),.args=CPUNSUBSCRIBE_Args},
+{MAKE_CMD("cssubscribe","Listens for messages published to shard channels, delivering only the latest value per interval.","O(N) where N is the number of shard channels to subscribe to.","9.2.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,CSSUBSCRIBE_History,0,CSSUBSCRIBE_Tips,0,cssubscribeCommand,-2,CMD_PUBSUB|CMD_NOSCRIPT|CMD_LOADING|CMD_STALE,ACL_CATEGORY_PUBSUB|ACL_CATEGORY_SLOW,NULL,CSSUBSCRIBE_Keyspecs,1,NULL,1),.args=CSSUBSCRIBE_Args},
+{MAKE_CMD("csubscribe","Listens for messages published to channels, delivering only the latest value per interval.","O(N) where N is the number of channels to subscribe to.","9.2.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,CSUBSCRIBE_History,0,CSUBSCRIBE_Tips,0,csubscribeCommand,-2,CMD_PUBSUB|CMD_NOSCRIPT|CMD_LOADING|CMD_STALE|CMD_SENTINEL,ACL_CATEGORY_PUBSUB|ACL_CATEGORY_SLOW,NULL,CSUBSCRIBE_Keyspecs,0,NULL,1),.args=CSUBSCRIBE_Args},
+{MAKE_CMD("csunsubscribe","Stops listening to messages posted to shard channels with conflation.","O(N) where N is the number of shard channels to unsubscribe.","9.2.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,CSUNSUBSCRIBE_History,0,CSUNSUBSCRIBE_Tips,0,csunsubscribeCommand,-1,CMD_PUBSUB|CMD_NOSCRIPT|CMD_LOADING|CMD_STALE,ACL_CATEGORY_PUBSUB|ACL_CATEGORY_SLOW,NULL,CSUNSUBSCRIBE_Keyspecs,1,NULL,1),.args=CSUNSUBSCRIBE_Args},
+{MAKE_CMD("cunsubscribe","Stops listening to conflated messages posted to channels.","O(N) where N is the number of channels to unsubscribe.","9.2.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,CUNSUBSCRIBE_History,0,CUNSUBSCRIBE_Tips,0,cunsubscribeCommand,-1,CMD_PUBSUB|CMD_NOSCRIPT|CMD_LOADING|CMD_STALE|CMD_SENTINEL,ACL_CATEGORY_PUBSUB|ACL_CATEGORY_SLOW,NULL,CUNSUBSCRIBE_Keyspecs,0,NULL,1),.args=CUNSUBSCRIBE_Args},
 {MAKE_CMD("psubscribe","Listens for messages published to channels that match one or more patterns.","O(N) where N is the number of patterns to subscribe to.","2.0.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,PSUBSCRIBE_History,0,PSUBSCRIBE_Tips,0,psubscribeCommand,-2,CMD_PUBSUB|CMD_NOSCRIPT|CMD_LOADING|CMD_STALE|CMD_SENTINEL,ACL_CATEGORY_PUBSUB|ACL_CATEGORY_SLOW,NULL,PSUBSCRIBE_Keyspecs,0,NULL,1),.args=PSUBSCRIBE_Args},
 {MAKE_CMD("publish","Posts a message to a channel.","O(N+M) where N is the number of clients subscribed to the receiving channel and M is the total number of subscribed patterns (by any client).","2.0.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,PUBLISH_History,0,PUBLISH_Tips,0,publishCommand,3,CMD_PUBSUB|CMD_LOADING|CMD_STALE|CMD_FAST|CMD_MAY_REPLICATE|CMD_SENTINEL,ACL_CATEGORY_FAST|ACL_CATEGORY_PUBSUB,NULL,PUBLISH_Keyspecs,0,NULL,2),.args=PUBLISH_Args},
 {MAKE_CMD("pubsub","A container for Pub/Sub commands.","Depends on subcommand.","2.8.0",CMD_DOC_NONE,NULL,NULL,"pubsub",COMMAND_GROUP_PUBSUB,PUBSUB_History,0,PUBSUB_Tips,0,NULL,-2,0,ACL_CATEGORY_SLOW,NULL,PUBSUB_Keyspecs,0,NULL,0),.subcommands=PUBSUB_Subcommands},

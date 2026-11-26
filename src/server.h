@@ -1303,6 +1303,12 @@ typedef struct ClientPubSubData {
     hashtable *pubsub_channels;      /* channels a client is interested in (SUBSCRIBE) */
     hashtable *pubsub_patterns;      /* patterns a client is interested in (PSUBSCRIBE) */
     hashtable *pubsubshard_channels; /* shard level channels a client is interested in (SSUBSCRIBE) */
+    hashtable *conflated_channels;   /* channels a client subscribed to with CSUBSCRIBE */
+    hashtable *conflated_patterns;   /* patterns from CPSUBSCRIBE (pattern -> dict channel -> conflatedSub) */
+    hashtable *conflated_shard_channels; /* shard channels from CSSUBSCRIBE */
+    size_t conflated_pending_bytes;        /* pending payload bytes held by this client */
+    unsigned long long conflated_pending_slots; /* pending payload slots */
+    unsigned long long conflated_pattern_entries; /* nested pattern->channel entries */
     size_t pubsub_object_mem;        /* Memory used by channel/pattern name robj objects. */
     /* If this client is in tracking mode and this field is non zero,
      * invalidation messages for keys fetched by this client will be sent to
@@ -1312,6 +1318,14 @@ typedef struct ClientPubSubData {
                                       subscribed to in BCAST mode, in the
                                       context of client side caching. */
 } ClientPubSubData;
+
+/* One ordered transparent-conflation rule from conflated-pubsub-auto:
+ * <user|*> <subscription-pattern> <interval-ms>. The first matching rule wins. */
+typedef struct conflatedAutoRule {
+    sds user;
+    sds pattern;
+    long long interval_ms;
+} conflatedAutoRule;
 
 /* Max decoded bytes processed before yielding to the event loop. This is
  * shared by steady-state and dual-channel replication paths. */
@@ -2434,6 +2448,32 @@ struct valkeyServer {
     kvstore *pubsubshard_channels; /* Map shard channels in every slot to list of subscribed clients */
     unsigned int pubsub_clients;   /* # of clients in Pub/Sub mode */
     unsigned int watching_clients; /* # of clients are watching keys */
+    /* Conflated Pub/Sub: CSUBSCRIBE subscribers receive only the latest payload
+     * per channel, delivered on an interval. PUBLISH itself is unchanged. */
+    dict *pubsub_conflated_channels;                   /* channel -> hashtable of conflated subscribers */
+    dict *pubsub_conflated_patterns;                   /* pattern -> hashtable of conflated pattern subscribers */
+    kvstore *pubsub_conflated_shard_channels;          /* slot -> shard channel -> conflated subscribers */
+    unsigned long long pubsub_conflated_subscriptions; /* # of active conflated exact/pattern subscriptions */
+    unsigned long long pubsub_conflated_shard_subscriptions; /* # of active conflated shard subscriptions */
+    unsigned long long pubsub_conflated_delivered;     /* # of payloads delivered by the conflated tick */
+    unsigned long long pubsub_conflated_replaced;      /* # of pending payloads replaced before delivery */
+    unsigned long long pubsub_conflated_pending;       /* gauge: pending payload slots */
+    unsigned long long pubsub_conflated_pending_bytes; /* gauge: pending payload bytes */
+    unsigned long long pubsub_conflated_pattern_entries; /* gauge: pattern->channel pending entries */
+    unsigned long long pubsub_conflated_dropped;       /* # of incoming values dropped by a memory cap */
+    unsigned long long pubsub_conflated_evicted;       /* # of pending entries evicted to make room */
+    unsigned long long pubsub_conflated_flush_truncated; /* # of ticks that hit the flush budget */
+    mstime_t pubsub_conflated_next_due;                /* earliest pending due; 0 = unknown, LLONG_MAX = none */
+    int pubsub_conflated_interval_ms;                  /* Delivery interval; 0 disables conflation */
+    int pubsub_conflated_max_pending_bytes;            /* per-client pending payload byte cap; 0 = unlimited */
+    int pubsub_conflated_max_total_pending_bytes;      /* global pending payload byte cap; 0 = unlimited */
+    int pubsub_conflated_max_pending_keys;             /* per-client pattern entry cap; 0 = unlimited */
+    int pubsub_conflated_max_total_pending_keys;       /* global pending slot+entry cap; 0 = unlimited */
+    int pubsub_conflated_overflow_policy;              /* drop_newest (default) or drop_oldest */
+    int pubsub_conflated_flush_budget;                 /* max deliveries per timer tick */
+    char *pubsub_conflated_auto_users;                 /* Single-line comma-separated users; empty = all */
+    char *pubsub_conflated_auto_patterns;              /* Single-line comma-separated subscription patterns; empty = all */
+    list *pubsub_conflated_auto_rules;                 /* Ordered conflatedAutoRule entries from conflated-pubsub-auto */
     /* Cluster */
     int cluster_enabled;                                   /* Is cluster enabled? */
     int cluster_port;                                      /* Set the cluster port for a node. */
@@ -3049,6 +3089,7 @@ static inline bool onServerMainThread(void) {
 
 extern struct sharedObjectsStruct shared;
 extern dictType objectKeyPointerValueDictType;
+extern dictType objToHashtableDictType;
 extern hashtableType objectHashtableType;
 extern dictType objectKeyHeapPointerValueDictType;
 extern hashtableType setHashtableType;
@@ -3791,6 +3832,7 @@ void checkChildrenDone(void);
 int setOOMScoreAdj(int process_class);
 void rejectCommandFormat(client *c, int notify_modules, const char *fmt, ...);
 void *activeDefragAlloc(void *ptr);
+void defragStringObjectSds(robj *ob);
 sds activeDefragSds(sds sdsptr);
 robj *activeDefragStringOb(robj *ob);
 void dismissSds(sds s);
@@ -3908,6 +3950,7 @@ void phpathcountCommand(client *c);
 int pubsubUnsubscribeAllChannels(client *c, int notify);
 int pubsubUnsubscribeShardAllChannels(client *c, int notify);
 void pubsubShardUnsubscribeAllChannelsInSlot(unsigned int slot);
+void pubsubConflatedShardUnsubscribeAllChannelsInSlot(unsigned int slot);
 int pubsubUnsubscribeAllPatterns(client *c, int notify);
 int pubsubPublishMessage(robj *channel, robj *message, int sharded);
 int pubsubPublishMessageAndPropagateToCluster(robj *channel, robj *message, int sharded);
@@ -3919,6 +3962,9 @@ void unmarkClientAsPubSub(client *c);
 int pubsubTotalSubscriptions(void);
 hashtable *getClientPubSubChannels(client *c);
 hashtable *getClientPubSubShardChannels(client *c);
+void pubsubDefragConflatedServer(void);
+void pubsubDefragConflatedClient(client *c);
+void pubsubConflatedReschedule(void);
 void initClientPubSubData(client *c);
 void freeClientPubSubData(client *c);
 
@@ -3940,6 +3986,7 @@ sds keyspaceEventsFlagsToString(int flags);
 #define DENY_LOADING_CONFIG (1ULL << 6) /* This config is forbidden during loading. */
 #define ALIAS_CONFIG (1ULL << 7)        /* For configs with multiple names, this flag is set on the alias. */
 #define MODULE_CONFIG (1ULL << 8)       /* This config is a module config */
+#define MULTI_ARG_QUOTED_CONFIG (1ULL << 10) /* MULTI_ARG_CONFIG whose value may contain quoted arguments. */
 #define VOLATILE_CONFIG (1ULL << 9)     /* The config is a reference to the config data and not the config data itself (ex. \
                                          * a file name containing more configuration like a tls key). In this case we want  \
                                          * to apply the configuration change even if the new config value is the same as    \
@@ -4447,6 +4494,17 @@ void hincrbyfloatCommand(client *c);
 void subscribeCommand(client *c);
 void unsubscribeCommand(client *c);
 void psubscribeCommand(client *c);
+void csubscribeCommand(client *c);
+void cssubscribeCommand(client *c);
+void csunsubscribeCommand(client *c);
+void cunsubscribeCommand(client *c);
+void cpsubscribeCommand(client *c);
+void cpunsubscribeCommand(client *c);
+void pubsubConflatedCron(void);
+long long pubsubConflatedTimer(struct aeEventLoop *eventLoop, long long id, void *clientData);
+
+#define PUBSUB_CONFLATED_DROP_NEWEST 0
+#define PUBSUB_CONFLATED_DROP_OLDEST 1
 void punsubscribeCommand(client *c);
 void publishCommand(client *c);
 void pubsubCommand(client *c);

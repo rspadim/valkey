@@ -1,0 +1,24 @@
+{
+    "CONFLATED": {
+        "summary": "Returns conflated Pub/Sub counters and memory gauges.",
+        "complexity": "O(1)",
+        "group": "pubsub",
+        "since": "9.2.0",
+        "arity": 2,
+        "container": "PUBSUB",
+        "function": "pubsubCommand",
+        "command_flags": [
+            "PUBSUB",
+            "LOADING",
+            "STALE"
+        ],
+        "reply_schema": {
+            "description": "Alternating counter names and integer values.",
+            "type": "array"
+        },
+        "acl_categories": [
+            "PUBSUB",
+            "SLOW"
+        ]
+    }
+}

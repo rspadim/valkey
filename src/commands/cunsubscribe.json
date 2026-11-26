@@ -1,0 +1,29 @@
+{
+    "CUNSUBSCRIBE": {
+        "summary": "Stops listening to conflated messages posted to channels.",
+        "complexity": "O(N) where N is the number of channels to unsubscribe.",
+        "group": "pubsub",
+        "since": "9.2.0",
+        "arity": -1,
+        "function": "cunsubscribeCommand",
+        "command_flags": [
+            "PUBSUB",
+            "NOSCRIPT",
+            "LOADING",
+            "STALE",
+            "SENTINEL"
+        ],
+        "arguments": [
+            {
+                "name": "channel",
+                "type": "string",
+                "optional": true,
+                "multiple": true
+            }
+        ],
+        "acl_categories": [
+            "PUBSUB",
+            "SLOW"
+        ]
+    }
+}

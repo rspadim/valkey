@@ -2431,6 +2431,7 @@ void initServerConfig(void) {
     int j;
     char *default_bindaddr[CONFIG_DEFAULT_BINDADDR_COUNT] = CONFIG_DEFAULT_BINDADDR;
 
+    server.pubsub_conflated_auto_rules = listCreate();
     initConfigValues();
     updateCachedTime(1);
     server.cmd_time_snapshot = server.mstime;
@@ -3225,6 +3226,23 @@ void initServer(void) {
      * (which has to be kvstore), see pubsubtype.serverPubSubChannels */
     server.pubsub_channels = kvstoreCreate(&kvstoreChannelHashtableType, 0, KVSTORE_ALLOCATE_HASHTABLES_ON_DEMAND);
     server.pubsub_patterns = dictCreate(&objToHashtableDictType);
+    server.pubsub_conflated_channels = dictCreate(&objToHashtableDictType);
+    server.pubsub_conflated_patterns = dictCreate(&objToHashtableDictType);
+    server.pubsub_conflated_shard_channels = kvstoreCreate(&kvstoreChannelHashtableType,
+                                                           server.cluster_enabled ? CLUSTER_SLOT_MASK_BITS : 0,
+                                                           KVSTORE_ALLOCATE_HASHTABLES_ON_DEMAND |
+                                                               KVSTORE_FREE_EMPTY_HASHTABLES);
+    server.pubsub_conflated_subscriptions = 0;
+    server.pubsub_conflated_shard_subscriptions = 0;
+    server.pubsub_conflated_delivered = 0;
+    server.pubsub_conflated_replaced = 0;
+    server.pubsub_conflated_pending = 0;
+    server.pubsub_conflated_pending_bytes = 0;
+    server.pubsub_conflated_pattern_entries = 0;
+    server.pubsub_conflated_dropped = 0;
+    server.pubsub_conflated_evicted = 0;
+    server.pubsub_conflated_flush_truncated = 0;
+    server.pubsub_conflated_next_due = 0;
     server.pubsubshard_channels = kvstoreCreate(&kvstoreChannelHashtableType, server.cluster_enabled ? CLUSTER_SLOT_MASK_BITS : 0,
                                                 KVSTORE_ALLOCATE_HASHTABLES_ON_DEMAND | KVSTORE_FREE_EMPTY_HASHTABLES);
     server.pubsub_clients = 0;
@@ -3299,6 +3317,13 @@ void initServer(void) {
      * on the client count. */
     if (aeCreateTimeEvent(server.el, 1, clientsTimeProc, NULL, NULL) == AE_ERR) {
         serverPanic("Can't create event clientsTimeProc timer.");
+        exit(1);
+    }
+    /* Conflated Pub/Sub has its own timer: serverCron runs at hz (10 by
+     * default), which is too coarse for sub-100ms delivery intervals. The
+     * callback re-arms itself at interval/4. */
+    if (aeCreateTimeEvent(server.el, 1, pubsubConflatedTimer, NULL, NULL) == AE_ERR) {
+        serverPanic("Can't create conflated Pub/Sub timer.");
         exit(1);
     }
 
@@ -5005,12 +5030,15 @@ int processCommand(client *c) {
     /* Only allow a subset of commands in the context of Pub/Sub if the
      * connection is in RESP2 mode. With RESP3 there are no limits. */
     if ((c->flag.pubsub && c->resp == 2) && c->cmd->proc != pingCommand && c->cmd->proc != subscribeCommand &&
+        c->cmd->proc != csubscribeCommand && c->cmd->proc != cssubscribeCommand &&
         c->cmd->proc != ssubscribeCommand && c->cmd->proc != unsubscribeCommand &&
+        c->cmd->proc != cunsubscribeCommand && c->cmd->proc != csunsubscribeCommand &&
         c->cmd->proc != sunsubscribeCommand && c->cmd->proc != psubscribeCommand &&
-        c->cmd->proc != punsubscribeCommand && c->cmd->proc != quitCommand && c->cmd->proc != resetCommand) {
+        c->cmd->proc != cpsubscribeCommand && c->cmd->proc != punsubscribeCommand && c->cmd->proc != cpunsubscribeCommand &&
+        c->cmd->proc != quitCommand && c->cmd->proc != resetCommand) {
         sds pubsub_err = sdscatprintf(sdsempty(),
-                                      "Can't execute '%s': only (P|S)SUBSCRIBE / "
-                                      "(P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context",
+                                      "Can't execute '%s': only (P|C|S)SUBSCRIBE / "
+                                      "(P|C|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context",
                                       c->cmd->fullname);
         sdsmapchars(pubsub_err, "\r\n", "  ", 2);
         rejectCommandSds(c, pubsub_err, 1);
@@ -6950,6 +6978,19 @@ sds genValkeyInfoString(dict *section_dict, int all_sections, int everything) {
                 "pubsub_channels:%llu\r\n", kvstoreSize(server.pubsub_channels),
                 "pubsub_patterns:%zu\r\n", dictSize(server.pubsub_patterns),
                 "pubsubshard_channels:%llu\r\n", kvstoreSize(server.pubsubshard_channels),
+                "pubsub_conflated_channels:%zu\r\n", dictSize(server.pubsub_conflated_channels),
+                "pubsub_conflated_patterns:%zu\r\n", dictSize(server.pubsub_conflated_patterns),
+                "pubsub_conflated_shard_channels:%llu\r\n", kvstoreSize(server.pubsub_conflated_shard_channels),
+                "pubsub_conflated_subscriptions:%llu\r\n", server.pubsub_conflated_subscriptions,
+                "pubsub_conflated_shard_subscriptions:%llu\r\n", server.pubsub_conflated_shard_subscriptions,
+                "pubsub_conflated_delivered:%llu\r\n", server.pubsub_conflated_delivered,
+                "pubsub_conflated_replaced:%llu\r\n", server.pubsub_conflated_replaced,
+                "pubsub_conflated_pending:%llu\r\n", server.pubsub_conflated_pending,
+                "pubsub_conflated_pending_bytes:%llu\r\n", server.pubsub_conflated_pending_bytes,
+                "pubsub_conflated_pattern_entries:%llu\r\n", server.pubsub_conflated_pattern_entries,
+                "pubsub_conflated_dropped:%llu\r\n", server.pubsub_conflated_dropped,
+                "pubsub_conflated_evicted:%llu\r\n", server.pubsub_conflated_evicted,
+                "pubsub_conflated_flush_truncated:%llu\r\n", server.pubsub_conflated_flush_truncated,
                 "latest_fork_usec:%lld\r\n", server.stat_fork_time,
                 "total_forks:%lld\r\n", server.stat_total_forks,
                 "migrate_cached_sockets:%zu\r\n", dictSize(server.migrate_cached_sockets),

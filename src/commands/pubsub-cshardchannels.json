@@ -1,0 +1,35 @@
+{
+    "CSHARDCHANNELS": {
+        "summary": "Returns the active shard channels with at least one conflated subscriber.",
+        "complexity": "O(N) where N is the number of active conflated shard channels, and assuming constant time pattern matching (relatively short shard channels).",
+        "group": "pubsub",
+        "since": "9.2.0",
+        "arity": -2,
+        "container": "PUBSUB",
+        "function": "pubsubCommand",
+        "command_flags": [
+            "PUBSUB",
+            "LOADING",
+            "STALE"
+        ],
+        "arguments": [
+            {
+                "name": "pattern",
+                "type": "pattern",
+                "optional": true
+            }
+        ],
+        "reply_schema": {
+            "description": "A list of active shard channels with conflated subscribers, optionally matching the specified pattern.",
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "uniqueItems": true
+        },
+        "acl_categories": [
+            "PUBSUB",
+            "SLOW"
+        ]
+    }
+}

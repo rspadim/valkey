@@ -1,0 +1,29 @@
+{
+    "CPUNSUBSCRIBE": {
+        "summary": "Stops listening to conflated messages posted to channels matching patterns.",
+        "complexity": "O(N) where N is the number of patterns to unsubscribe.",
+        "group": "pubsub",
+        "since": "9.2.0",
+        "arity": -1,
+        "function": "cpunsubscribeCommand",
+        "command_flags": [
+            "PUBSUB",
+            "NOSCRIPT",
+            "LOADING",
+            "STALE",
+            "SENTINEL"
+        ],
+        "arguments": [
+            {
+                "name": "pattern",
+                "type": "pattern",
+                "optional": true,
+                "multiple": true
+            }
+        ],
+        "acl_categories": [
+            "PUBSUB",
+            "SLOW"
+        ]
+    }
+}

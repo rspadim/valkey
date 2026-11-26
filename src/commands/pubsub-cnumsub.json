@@ -1,0 +1,32 @@
+{
+    "CNUMSUB": {
+        "summary": "Returns a count of conflated subscribers to channels.",
+        "complexity": "O(N) where N is the number of requested channels.",
+        "group": "pubsub",
+        "since": "9.2.0",
+        "arity": -2,
+        "container": "PUBSUB",
+        "function": "pubsubCommand",
+        "command_flags": [
+            "PUBSUB",
+            "LOADING",
+            "STALE"
+        ],
+        "arguments": [
+            {
+                "name": "channel",
+                "type": "string",
+                "optional": true,
+                "multiple": true
+            }
+        ],
+        "reply_schema": {
+            "description": "The number of conflated subscribers per channel, each even element is the channel name and each odd element is the count.",
+            "type": "array"
+        },
+        "acl_categories": [
+            "PUBSUB",
+            "SLOW"
+        ]
+    }
+}

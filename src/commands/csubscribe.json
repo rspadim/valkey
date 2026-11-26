@@ -1,0 +1,28 @@
+{
+    "CSUBSCRIBE": {
+        "summary": "Listens for messages published to channels, delivering only the latest value per interval.",
+        "complexity": "O(N) where N is the number of channels to subscribe to.",
+        "group": "pubsub",
+        "since": "9.2.0",
+        "arity": -2,
+        "function": "csubscribeCommand",
+        "command_flags": [
+            "PUBSUB",
+            "NOSCRIPT",
+            "LOADING",
+            "STALE",
+            "SENTINEL"
+        ],
+        "arguments": [
+            {
+                "name": "channel",
+                "type": "string",
+                "multiple": true
+            }
+        ],
+        "acl_categories": [
+            "PUBSUB",
+            "SLOW"
+        ]
+    }
+}

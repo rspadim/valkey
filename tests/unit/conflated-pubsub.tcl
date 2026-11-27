@@ -282,4 +282,234 @@ start_server {tags {"pubsub"}} {
         $rd close
         r config set conflated-pubsub-interval-ms 0
     }
+
+    proc conflated_client_field {name field} {
+        set clients [split [string trim [r client list]] "\r\n"]
+        set line [lsearch -inline $clients *name=$name*]
+        if {$line eq ""} { error "client $name not found" }
+        if {![regexp "$field=(\[0-9\]+)" $line - value]} {
+            error "field $field not found for $name"
+        }
+        return $value
+    }
+
+    proc conflated_stat {field} {
+        return [dict get [dict create {*}[r pubsub conflated]] $field]
+    }
+
+    test "conflated memory is attributed to CLIENT LIST tot-mem" {
+        r config set conflated-pubsub-interval-ms 60000
+        set rd [valkey_deferring_client]
+        $rd client setname mem-client
+        assert_equal OK [$rd read]
+        set base [conflated_client_field mem-client tot-mem]
+
+        set channels {}
+        for {set i 0} {$i < 100} {incr i} {
+            lappend channels "mem:exact:$i:0123456789abcdef"
+        }
+        $rd CSUBSCRIBE {*}$channels
+        for {set i 0} {$i < 100} {incr i} { $rd read }
+        set exact_mem [conflated_client_field mem-client tot-mem]
+        # Every channel name is 28 bytes; the struct/table overhead adds more.
+        assert {$exact_mem - $base >= 100 * 28}
+
+        $rd CUNSUBSCRIBE {*}$channels
+        for {set i 0} {$i < 100} {incr i} { $rd read }
+        set after_exact [conflated_client_field mem-client tot-mem]
+        assert {$after_exact <= $base + 32768}
+
+        $rd CPSUBSCRIBE mempat:*
+        assert_equal {psubscribe mempat:* 1} [$rd read]
+        for {set i 0} {$i < 100} {incr i} {
+            r publish "mempat:$i:0123456789abcdef" value
+        }
+        set pattern_mem [conflated_client_field mem-client tot-mem]
+        assert {$pattern_mem - $after_exact >= 100 * 28}
+        $rd CPUNSUBSCRIBE mempat:*
+        assert_match {punsubscribe mempat:* *} [$rd read]
+        set after_pattern [conflated_client_field mem-client tot-mem]
+        assert {$after_pattern <= $base + 32768}
+
+        set shard_channels {}
+        for {set i 0} {$i < 100} {incr i} {
+            lappend shard_channels "mem:shard:$i:0123456789abcdef"
+        }
+        $rd CSSUBSCRIBE {*}$shard_channels
+        for {set i 0} {$i < 100} {incr i} { $rd read }
+        set shard_mem [conflated_client_field mem-client tot-mem]
+        assert {$shard_mem - $after_pattern >= 100 * 28}
+        $rd CSUNSUBSCRIBE {*}$shard_channels
+        for {set i 0} {$i < 100} {incr i} { $rd read }
+        set after_shard [conflated_client_field mem-client tot-mem]
+        assert {$after_shard <= $base + 65536}
+
+        $rd close
+        r config set conflated-pubsub-interval-ms 0
+    }
+
+    test "interval 0 drops pending payloads and keeps subscriptions" {
+        r config set conflated-pubsub-interval-ms 500
+        set rd [valkey_deferring_client]
+        $rd CSUBSCRIBE itest
+        assert_equal {subscribe itest 1} [$rd read]
+        r publish itest value
+        assert {[conflated_stat pending] >= 1}
+        assert {[conflated_stat pending_bytes] >= 5}
+
+        r config set conflated-pubsub-interval-ms 0
+        assert_equal 0 [conflated_stat pending]
+        assert_equal 0 [conflated_stat pending_bytes]
+        assert_equal {itest 1} [r pubsub cnumsub itest]
+
+        # Re-subscribing captures the new interval; the old payload is gone.
+        r config set conflated-pubsub-interval-ms 50
+        $rd CUNSUBSCRIBE itest
+        assert_equal {unsubscribe itest 0} [$rd read]
+        $rd CSUBSCRIBE itest
+        assert_equal {subscribe itest 1} [$rd read]
+        r publish itest new
+        after 250
+        assert_equal {message itest new} [$rd read]
+        $rd close
+        r config set conflated-pubsub-interval-ms 0
+    }
+
+    test "byte caps count payload bytes and not slot overhead" {
+        r config set conflated-pubsub-interval-ms 60000
+        r config set conflated-pubsub-max-pending-bytes 100
+        r config set conflated-pubsub-max-total-pending-bytes 0
+        r config set conflated-pubsub-max-pending-keys 0
+        r config set conflated-pubsub-max-total-pending-keys 0
+        set dropped0 [conflated_stat dropped]
+        set rd [valkey_deferring_client]
+        $rd CPSUBSCRIBE tiny:*
+        assert_equal {psubscribe tiny:* 1} [$rd read]
+        for {set i 0} {$i < 100} {incr i} {
+            r publish "tiny:$i" x
+        }
+        assert_equal 100 [conflated_stat pending_bytes]
+        assert_equal 100 [conflated_stat pattern_entries]
+        r publish tiny:extra x
+        assert_equal 100 [conflated_stat pending_bytes]
+        assert {[conflated_stat dropped] - $dropped0 >= 1}
+        $rd close
+        r config set conflated-pubsub-max-pending-bytes 67108864
+        r config set conflated-pubsub-max-total-pending-bytes 268435456
+        r config set conflated-pubsub-max-pending-keys 100000
+        r config set conflated-pubsub-max-total-pending-keys 1000000
+        r config set conflated-pubsub-interval-ms 0
+    }
+
+    test "single-line auto lists trim spaces and keep literal = aliases" {
+        r config set conflated-pubsub-auto ""
+        r config set conflated-pubsub-auto-users ""
+        r config set conflated-pubsub-auto-patterns "lit=0,inv=abc"
+        r config set conflated-pubsub-interval-ms 100
+        set rd [valkey_deferring_client]
+
+        $rd SUBSCRIBE lit
+        assert_equal {subscribe lit 1} [$rd read]
+        assert_equal {lit 0} [r pubsub cnumsub lit]
+        $rd SUBSCRIBE lit=0
+        assert_equal {subscribe lit=0 2} [$rd read]
+        assert_equal {lit=0 1} [r pubsub cnumsub lit=0]
+        $rd SUBSCRIBE inv
+        assert_equal {subscribe inv 3} [$rd read]
+        assert_equal {inv 0} [r pubsub cnumsub inv]
+        $rd SUBSCRIBE inv=abc
+        assert_equal {subscribe inv=abc 4} [$rd read]
+        assert_equal {inv=abc 1} [r pubsub cnumsub inv=abc]
+        $rd close
+
+        r config set conflated-pubsub-auto-patterns ""
+        r acl setuser spaceuser on nopass resetchannels &* +@pubsub
+        r config set conflated-pubsub-auto-users " spaceuser=50 "
+        set rd [valkey_deferring_client]
+        $rd AUTH spaceuser x
+        assert_equal OK [$rd read]
+        $rd SUBSCRIBE spaced
+        assert_equal {subscribe spaced 1} [$rd read]
+        assert_equal {spaced 1} [r pubsub cnumsub spaced]
+        $rd close
+        r acl deluser spaceuser
+        r config set conflated-pubsub-auto-users ""
+        r config set conflated-pubsub-auto-patterns ""
+        r config set conflated-pubsub-interval-ms 0
+    }
+
+    test "overflow at 20k pattern entries is constant-time and bounded" {
+        wait_for_condition 50 100 {
+            [conflated_stat pending] == 0 && [conflated_stat pattern_entries] == 0
+        } else {
+            fail "pending state did not drain"
+        }
+        r config set conflated-pubsub-interval-ms 60000
+        r config set conflated-pubsub-max-pending-keys 20000
+        r config set conflated-pubsub-max-total-pending-keys 0
+        r config set conflated-pubsub-max-pending-bytes 0
+        r config set conflated-pubsub-max-total-pending-bytes 0
+        r config set conflated-pubsub-overflow-policy drop_newest
+        set dropped0 [conflated_stat dropped]
+        set evicted0 [conflated_stat evicted]
+        set rd [valkey_deferring_client]
+        $rd CPSUBSCRIBE ovf:*
+        assert_equal {psubscribe ovf:* 1} [$rd read]
+
+        set start [clock microseconds]
+        for {set i 0} {$i < 20000} {incr i} { r publish "ovf:a:$i" x }
+        set fill_us [expr {[clock microseconds] - $start}]
+        assert_equal 20000 [conflated_stat pattern_entries]
+        assert_equal 20000 [conflated_stat pending]
+
+        set start [clock microseconds]
+        for {set i 0} {$i < 20000} {incr i} { r publish "ovf:b:$i" x }
+        set drop_us [expr {[clock microseconds] - $start}]
+        assert {[conflated_stat dropped] - $dropped0 >= 20000}
+        assert_equal 20000 [conflated_stat pattern_entries]
+        assert_equal 20000 [conflated_stat pending]
+        # A drop must not scan the 20k pending index; it should stay in the
+        # same order of magnitude as the fill that created it.
+        assert {$drop_us < $fill_us * 4 + 2000000}
+
+        r config set conflated-pubsub-overflow-policy drop_oldest
+        set start [clock microseconds]
+        for {set i 0} {$i < 20000} {incr i} { r publish "ovf:c:$i" x }
+        set evict_us [expr {[clock microseconds] - $start}]
+        assert {[conflated_stat evicted] - $evicted0 >= 20000}
+        assert_equal 20000 [conflated_stat pattern_entries]
+        assert_equal 20000 [conflated_stat pending]
+        assert {$evict_us < $fill_us * 4 + 2000000}
+
+        $rd close
+        r config set conflated-pubsub-overflow-policy drop_newest
+        r config set conflated-pubsub-max-pending-keys 100000
+        r config set conflated-pubsub-max-total-pending-keys 1000000
+        r config set conflated-pubsub-max-pending-bytes 67108864
+        r config set conflated-pubsub-max-total-pending-bytes 268435456
+        r config set conflated-pubsub-interval-ms 0
+    }
+
+    test "rescheduled pending values are delivered from the global queue" {
+        r config set conflated-pubsub-interval-ms 60000
+        set rd [valkey_deferring_client]
+        $rd CPSUBSCRIBE batch:*
+        assert_equal {psubscribe batch:* 1} [$rd read]
+        for {set i 0} {$i < 5000} {incr i} { r publish "batch:$i" "v$i" }
+        assert_equal 5000 [conflated_stat pending]
+        r config set conflated-pubsub-interval-ms 50
+        after 500
+        array set got {}
+        for {set i 0} {$i < 5000} {incr i} {
+            lassign [$rd read] _ pattern channel payload
+            assert_equal batch:* $pattern
+            set got($channel) $payload
+        }
+        assert_equal 5000 [array size got]
+        assert_equal v0 $got(batch:0)
+        assert_equal v4999 $got(batch:4999)
+        assert_equal 0 [conflated_stat pending]
+        $rd close
+        r config set conflated-pubsub-interval-ms 0
+    }
 }

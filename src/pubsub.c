@@ -93,24 +93,85 @@ pubsubtype pubSubType = {
 
 /* State of one CSUBSCRIBE subscription. `payload` is the latest value not yet
  * delivered; it is a refcounted shared object, so replacing it costs one
- * incref/decref and no byte copy. */
-typedef struct conflatedSub {
+ * incref/decref and no byte copy. Each subscription is also a node in two
+ * FIFO queues: the client's pending queue (used to evict the oldest value of
+ * that client) and the server's pending queue (used by the timer to visit only
+ * values whose due time has passed). The queues are ordered by `due`, which is
+ * monotonic for new values; clock adjustment and interval rescheduling are
+ * handled by inserting in order. */
+#define CONFLATED_QUEUE_NONE 0
+#define CONFLATED_QUEUE_PENDING 1 /* in the owning client's pending queue */
+#define CONFLATED_QUEUE_NULL 2    /* delivered pattern entry, recyclable */
+#define CONFLATED_QUEUE_GLOBAL 4  /* in the server's pending queue */
+
+#define CONFLATED_KIND_EXACT 1
+#define CONFLATED_KIND_PATTERN 2
+#define CONFLATED_KIND_SHARD 3
+
+struct conflatedSub {
     long long interval_ms; /* Delivery interval in milliseconds. */
     mstime_t due;          /* When the pending payload is due; 0 = nothing pending. */
     robj *payload;         /* Latest payload not yet delivered, or NULL. */
-} conflatedSub;
+    client *owner;         /* Client that owns this pending slot. */
+    struct conflatedSub *prev, *next;   /* Client pending or null queue. */
+    struct conflatedSub *gprev, *gnext; /* Server pending queue. */
+    dict *pattern_channels;             /* Owned nested dict for pattern slots. */
+    struct conflatedPatternSub *pattern_owner; /* Pattern whose channels dict owns this. */
+    robj *pattern;                      /* Pattern key for pattern slots. */
+    robj *channel;                      /* Concrete channel key (borrowed). */
+    unsigned char kind;                 /* CONFLATED_KIND_* */
+    unsigned char queue;                /* CONFLATED_QUEUE_* bits */
+};
+
+typedef struct conflatedSub conflatedSub;
+
+/* Account allocation overhead (structs, names, nested tables) in the client's
+ * pubsub memory. Pending payload bytes have their own gauge. */
+static void conflatedAccountMemory(client *c, size_t bytes, int add) {
+    if (add) {
+        c->pubsub_data->conflated_overhead_mem += bytes;
+        return;
+    }
+    serverAssert(c->pubsub_data->conflated_overhead_mem >= bytes);
+    c->pubsub_data->conflated_overhead_mem -= bytes;
+}
+
+static void conflatedGlobalQueueInsert(conflatedSub *sub);
+static void conflatedGlobalQueueUnlink(conflatedSub *sub);
+static void conflatedLocalQueueInsertDue(conflatedSub *sub);
+static void conflatedLocalQueuePushTail(conflatedSub *sub, int queue);
+static void conflatedLocalQueueUnlink(conflatedSub *sub);
+
+static void conflatedAccountPayload(client *c, size_t bytes, int add);
+static void conflatedAccountPatternEntry(client *c, int add);
+static size_t conflatedPayloadBytes(robj *payload);
 
 static void conflatedSubDestructor(void *value) {
     conflatedSub *sub = value;
-    if (sub->payload) decrRefCount(sub->payload);
+    client *c = sub->owner;
+    serverAssert(c != NULL && c->pubsub_data != NULL);
+    conflatedGlobalQueueUnlink(sub);
+    conflatedLocalQueueUnlink(sub);
+    if (sub->payload) {
+        size_t bytes = conflatedPayloadBytes(sub->payload);
+        decrRefCount(sub->payload);
+        conflatedAccountPayload(c, bytes, 0);
+    }
+    if (sub->kind == CONFLATED_KIND_PATTERN) conflatedAccountPatternEntry(c, 0);
+    conflatedAccountMemory(c, zmalloc_size(sub), 0);
     zfree(sub);
 }
 
 /* Object key -> conflatedSub value. */
 static void conflatedSubDictEntryDestructor(void *entry) {
     dictEntry *de = entry;
-    conflatedSubDestructor(dictGetVal(de));
-    decrRefCount(dictGetKey(de));
+    robj *key = dictGetKey(de);
+    conflatedSub *sub = dictGetVal(de);
+    client *c = sub->owner;
+    serverAssert(c != NULL && c->pubsub_data != NULL);
+    conflatedAccountMemory(c, getStringObjectMemory(key), 0);
+    conflatedSubDestructor(sub);
+    decrRefCount(key);
     zfree(de);
 }
 
@@ -126,19 +187,33 @@ static dictType conflatedSubDictType = {
  * every new channel matched later. */
 typedef struct conflatedPatternSub {
     long long interval_ms;
+    client *owner;
     dict *channels;
+    size_t channels_mem; /* accounted hashtable memory for channels */
 } conflatedPatternSub;
+
+static void conflatedPatternTableSync(client *c, conflatedPatternSub *ps, size_t current);
 
 static void conflatedPatternSubDestructor(void *value) {
     conflatedPatternSub *ps = value;
+    client *c = ps->owner;
+    serverAssert(c != NULL && c->pubsub_data != NULL);
+    conflatedPatternTableSync(c, ps, hashtableMemUsage(ps->channels));
+    conflatedAccountMemory(c, ps->channels_mem, 0);
+    conflatedAccountMemory(c, zmalloc_size(ps), 0);
     dictRelease(ps->channels);
     zfree(ps);
 }
 
 static void conflatedPatternSubDictEntryDestructor(void *entry) {
     dictEntry *de = entry;
-    conflatedPatternSubDestructor(dictGetVal(de));
-    decrRefCount(dictGetKey(de));
+    robj *key = dictGetKey(de);
+    conflatedPatternSub *ps = dictGetVal(de);
+    client *c = ps->owner;
+    serverAssert(c != NULL && c->pubsub_data != NULL);
+    conflatedAccountMemory(c, getStringObjectMemory(key), 0);
+    conflatedPatternSubDestructor(ps);
+    decrRefCount(key);
     zfree(de);
 }
 
@@ -148,6 +223,49 @@ static dictType conflatedPatternSubDictType = {
     .keyCompare = dictObjKeyCompare,
     .entryDestructor = conflatedPatternSubDictEntryDestructor,
 };
+
+/* Create an empty exact/shard/pattern slot and account its struct. The caller
+ * accounts the channel/pattern name and the nested table growth. */
+static conflatedSub *conflatedSubCreate(client *c, long long interval_ms, int kind) {
+    conflatedSub *sub = zmalloc(sizeof(*sub));
+    sub->interval_ms = interval_ms;
+    sub->due = 0;
+    sub->payload = NULL;
+    sub->owner = c;
+    sub->prev = sub->next = NULL;
+    sub->gprev = sub->gnext = NULL;
+    sub->pattern_channels = NULL;
+    sub->pattern_owner = NULL;
+    sub->pattern = NULL;
+    sub->channel = NULL;
+    sub->kind = kind;
+    sub->queue = CONFLATED_QUEUE_NONE;
+    conflatedAccountMemory(c, zmalloc_size(sub), 1);
+    return sub;
+}
+
+static conflatedPatternSub *conflatedPatternSubCreate(client *c, long long interval_ms) {
+    conflatedPatternSub *ps = zmalloc(sizeof(*ps));
+    ps->interval_ms = interval_ms;
+    ps->owner = c;
+    ps->channels = dictCreate(&conflatedSubDictType);
+    ps->channels_mem = hashtableMemUsage(ps->channels);
+    conflatedAccountMemory(c, zmalloc_size(ps), 1);
+    conflatedAccountMemory(c, ps->channels_mem, 1);
+    return ps;
+}
+
+/* Keep the accounted nested-table bytes equal to the measured table usage.
+ * Hash rehashing can relocate buckets outside the instant of an add/delete, so
+ * each operation reconciles the previous estimate before applying its delta. */
+static void conflatedPatternTableSync(client *c, conflatedPatternSub *ps, size_t current) {
+    if (current >= ps->channels_mem) {
+        conflatedAccountMemory(c, current - ps->channels_mem, 1);
+    } else {
+        conflatedAccountMemory(c, ps->channels_mem - current, 0);
+    }
+    ps->channels_mem = current;
+}
 
 /* Pending accounting. These gauges are the only memory bound for conflated
  * delivery, so every path that stores, replaces, delivers or evicts a payload
@@ -188,248 +306,189 @@ static void conflatedAccountPatternEntry(client *c, int add) {
     server.pubsub_conflated_pattern_entries--;
 }
 
+/* Insert a pending subscription in its client's queue, ordered by due. The
+ * common case is an append (new values are due later than every pending
+ * value); a backward walk only runs if the wall clock moved backwards or the
+ * interval was rescheduled. */
+static void conflatedLocalQueueInsertDue(conflatedSub *sub) {
+    client *c = sub->owner;
+    ClientPubSubData *pd = c->pubsub_data;
+    serverAssert((sub->queue & (CONFLATED_QUEUE_PENDING | CONFLATED_QUEUE_NULL)) == 0);
+
+    conflatedSub *pos = pd->conflated_pending_tail;
+    while (pos && pos->due > sub->due) pos = pos->prev;
+
+    sub->prev = pos;
+    sub->next = pos ? pos->next : pd->conflated_pending_head;
+    if (sub->next)
+        sub->next->prev = sub;
+    else
+        pd->conflated_pending_tail = sub;
+    if (pos)
+        pos->next = sub;
+    else
+        pd->conflated_pending_head = sub;
+    sub->queue |= CONFLATED_QUEUE_PENDING;
+}
+
+/* Append a delivered pattern entry to the recyclable null queue. */
+static void conflatedLocalQueuePushTail(conflatedSub *sub, int queue) {
+    client *c = sub->owner;
+    ClientPubSubData *pd = c->pubsub_data;
+    serverAssert(queue == CONFLATED_QUEUE_NULL);
+    serverAssert((sub->queue & (CONFLATED_QUEUE_PENDING | CONFLATED_QUEUE_NULL)) == 0);
+
+    sub->prev = pd->conflated_null_tail;
+    sub->next = NULL;
+    if (pd->conflated_null_tail)
+        pd->conflated_null_tail->next = sub;
+    else
+        pd->conflated_null_head = sub;
+    pd->conflated_null_tail = sub;
+    sub->queue |= queue;
+}
+
+static void conflatedLocalQueueUnlink(conflatedSub *sub) {
+    if (!(sub->queue & (CONFLATED_QUEUE_PENDING | CONFLATED_QUEUE_NULL))) {
+        sub->prev = sub->next = NULL;
+        return;
+    }
+    serverAssert(!((sub->queue & CONFLATED_QUEUE_PENDING) && (sub->queue & CONFLATED_QUEUE_NULL)));
+    ClientPubSubData *pd = sub->owner->pubsub_data;
+    int pending = sub->queue & CONFLATED_QUEUE_PENDING;
+    conflatedSub **head = pending ? &pd->conflated_pending_head : &pd->conflated_null_head;
+    conflatedSub **tail = pending ? &pd->conflated_pending_tail : &pd->conflated_null_tail;
+
+    if (sub->prev)
+        sub->prev->next = sub->next;
+    else
+        *head = sub->next;
+    if (sub->next)
+        sub->next->prev = sub->prev;
+    else
+        *tail = sub->prev;
+    sub->queue &= ~(CONFLATED_QUEUE_PENDING | CONFLATED_QUEUE_NULL);
+    sub->prev = sub->next = NULL;
+}
+
+/* Insert a pending value in the server queue, ordered by due. The timer only
+ * visits the head, so the cost of a tick is proportional to the values that
+ * are actually due, not to the size of the pending index. */
+static void conflatedGlobalQueueInsert(conflatedSub *sub) {
+    serverAssert(!(sub->queue & CONFLATED_QUEUE_GLOBAL));
+
+    conflatedSub *pos = server.pubsub_conflated_pending_tail;
+    while (pos && pos->due > sub->due) pos = pos->gprev;
+
+    sub->gprev = pos;
+    sub->gnext = pos ? pos->gnext : server.pubsub_conflated_pending_head;
+    if (sub->gnext)
+        sub->gnext->gprev = sub;
+    else
+        server.pubsub_conflated_pending_tail = sub;
+    if (pos)
+        pos->gnext = sub;
+    else
+        server.pubsub_conflated_pending_head = sub;
+    sub->queue |= CONFLATED_QUEUE_GLOBAL;
+    server.pubsub_conflated_next_due = server.pubsub_conflated_pending_head->due;
+}
+
+static void conflatedGlobalQueueUnlink(conflatedSub *sub) {
+    if (!(sub->queue & CONFLATED_QUEUE_GLOBAL)) return;
+    if (sub->gprev)
+        sub->gprev->gnext = sub->gnext;
+    else
+        server.pubsub_conflated_pending_head = sub->gnext;
+    if (sub->gnext)
+        sub->gnext->gprev = sub->gprev;
+    else
+        server.pubsub_conflated_pending_tail = sub->gprev;
+    sub->queue &= ~CONFLATED_QUEUE_GLOBAL;
+    sub->gprev = sub->gnext = NULL;
+    server.pubsub_conflated_next_due =
+        server.pubsub_conflated_pending_head ? server.pubsub_conflated_pending_head->due : LLONG_MAX;
+}
+
 static void conflatedClearPayload(client *c, conflatedSub *sub) {
     if (sub->payload == NULL) return;
     size_t bytes = conflatedPayloadBytes(sub->payload);
     decrRefCount(sub->payload);
     sub->payload = NULL;
     sub->due = 0;
+    conflatedGlobalQueueUnlink(sub);
+    conflatedLocalQueueUnlink(sub);
     conflatedAccountPayload(c, bytes, 0);
-    /* Force the next timer tick to recompute the earliest due time. */
-    server.pubsub_conflated_next_due = 0;
+    if (sub->kind == CONFLATED_KIND_PATTERN) conflatedLocalQueuePushTail(sub, CONFLATED_QUEUE_NULL);
 }
 
-/* Record a newly pending due time so an idle timer can skip the full scan. */
-static void conflatedMarkDue(mstime_t due) {
-    /* 0 means "unknown, force a scan": do not hide an earlier pending due
-     * that was cleared before this publish. */
-    if (server.pubsub_conflated_next_due != 0 &&
-        (server.pubsub_conflated_next_due == LLONG_MAX || due < server.pubsub_conflated_next_due)) {
-        server.pubsub_conflated_next_due = due;
-    }
-}
-
-/* Recompute the earliest pending due after a delivery/clear pass. */
-static void conflatedRecomputeNextDue(void) {
-    mstime_t next = LLONG_MAX;
-    dictIterator *di = dictGetIterator(server.pubsub_conflated_channels);
-    dictEntry *de;
-    while ((de = dictNext(di)) != NULL) {
-        hashtable *clients = dictGetVal(de);
-        hashtableIterator iter;
-        hashtableInitIterator(&iter, clients, 0);
-        void *entry;
-        while (hashtableNext(&iter, &entry)) {
-            client *c = entry;
-            if (!c->pubsub_data) continue;
-            conflatedSub *sub = dictFetchValue(c->pubsub_data->conflated_channels, dictGetKey(de));
-            if (sub && sub->payload && sub->due < next) next = sub->due;
-        }
-        hashtableCleanupIterator(&iter);
-    }
-    dictReleaseIterator(di);
-
-    dictIterator *pdi = dictGetIterator(server.pubsub_conflated_patterns);
-    dictEntry *pde;
-    while ((pde = dictNext(pdi)) != NULL) {
-        hashtable *clients = dictGetVal(pde);
-        hashtableIterator iter;
-        hashtableInitIterator(&iter, clients, 0);
-        void *entry;
-        while (hashtableNext(&iter, &entry)) {
-            client *c = entry;
-            if (!c->pubsub_data) continue;
-            conflatedPatternSub *ps = dictFetchValue(c->pubsub_data->conflated_patterns, dictGetKey(pde));
-            if (!ps) continue;
-            dictIterator *cdi = dictGetIterator(ps->channels);
-            dictEntry *cde;
-            while ((cde = dictNext(cdi)) != NULL) {
-                conflatedSub *sub = dictGetVal(cde);
-                if (sub->payload && sub->due < next) next = sub->due;
-            }
-            dictReleaseIterator(cdi);
-        }
-        hashtableCleanupIterator(&iter);
-    }
-    dictReleaseIterator(pdi);
-
-    kvstoreIterator *kvs_it = kvstoreIteratorInit(server.pubsub_conflated_shard_channels, 0);
-    void *element;
-    while (kvstoreIteratorNext(kvs_it, &element)) {
-        hashtable *clients = element;
-        robj *channel = *(robj **)hashtableMetadata(clients);
-        hashtableIterator iter;
-        hashtableInitIterator(&iter, clients, 0);
-        void *entry;
-        while (hashtableNext(&iter, &entry)) {
-            client *c = entry;
-            if (!c->pubsub_data) continue;
-            conflatedSub *sub = dictFetchValue(c->pubsub_data->conflated_shard_channels, channel);
-            if (sub && sub->payload && sub->due < next) next = sub->due;
-        }
-        hashtableCleanupIterator(&iter);
-    }
-    kvstoreIteratorRelease(kvs_it);
-    server.pubsub_conflated_next_due = next;
-}
-
-/* Re-schedule all pending values after conflated-pubsub-interval-ms changes. */
+/* Re-schedule all pending values after conflated-pubsub-interval-ms changes.
+ * Setting the interval to 0 disables delivery and drops the pending payloads
+ * immediately; the subscription indexes and the learned pattern channels stay,
+ * so re-enabling the interval resumes delivery without re-subscribing. */
 void pubsubConflatedReschedule(void) {
     if (!server.pubsub_conflated_channels || !server.pubsub_conflated_patterns ||
         !server.pubsub_conflated_shard_channels)
         return;
     long long interval = server.pubsub_conflated_interval_ms;
-    if (interval <= 0) return;
+    if (interval <= 0) {
+        while (server.pubsub_conflated_pending_head) {
+            conflatedSub *sub = server.pubsub_conflated_pending_head;
+            conflatedClearPayload(sub->owner, sub);
+        }
+        return;
+    }
+
     mstime_t due = mstime() + interval;
-
-    dictIterator *di = dictGetIterator(server.pubsub_conflated_channels);
-    dictEntry *de;
-    while ((de = dictNext(di)) != NULL) {
-        hashtable *clients = dictGetVal(de);
-        hashtableIterator iter;
-        hashtableInitIterator(&iter, clients, 0);
-        void *entry;
-        while (hashtableNext(&iter, &entry)) {
-            client *c = entry;
-            if (!c->pubsub_data) continue;
-            conflatedSub *sub = dictFetchValue(c->pubsub_data->conflated_channels, dictGetKey(de));
-            if (sub && sub->payload) sub->due = due;
-        }
-        hashtableCleanupIterator(&iter);
+    for (conflatedSub *sub = server.pubsub_conflated_pending_head; sub; sub = sub->gnext) {
+        sub->due = due;
     }
-    dictReleaseIterator(di);
+    server.pubsub_conflated_next_due =
+        server.pubsub_conflated_pending_head ? due : LLONG_MAX;
+}
 
-    dictIterator *pdi = dictGetIterator(server.pubsub_conflated_patterns);
-    dictEntry *pde;
-    while ((pde = dictNext(pdi)) != NULL) {
-        hashtable *clients = dictGetVal(pde);
-        hashtableIterator iter;
-        hashtableInitIterator(&iter, clients, 0);
-        void *entry;
-        while (hashtableNext(&iter, &entry)) {
-            client *c = entry;
-            if (!c->pubsub_data) continue;
-            conflatedPatternSub *ps = dictFetchValue(c->pubsub_data->conflated_patterns, dictGetKey(pde));
-            if (!ps) continue;
-            dictIterator *cdi = dictGetIterator(ps->channels);
-            dictEntry *cde;
-            while ((cde = dictNext(cdi)) != NULL) {
-                conflatedSub *sub = dictGetVal(cde);
-                if (sub->payload) sub->due = due;
-            }
-            dictReleaseIterator(cdi);
-        }
-        hashtableCleanupIterator(&iter);
-    }
-    dictReleaseIterator(pdi);
-
-    kvstoreIterator *kvs_it = kvstoreIteratorInit(server.pubsub_conflated_shard_channels, 0);
-    void *element;
-    while (kvstoreIteratorNext(kvs_it, &element)) {
-        hashtable *clients = element;
-        robj *channel = *(robj **)hashtableMetadata(clients);
-        hashtableIterator iter;
-        hashtableInitIterator(&iter, clients, 0);
-        void *entry;
-        while (hashtableNext(&iter, &entry)) {
-            client *c = entry;
-            if (!c->pubsub_data) continue;
-            conflatedSub *sub = dictFetchValue(c->pubsub_data->conflated_shard_channels, channel);
-            if (sub && sub->payload) sub->due = due;
-        }
-        hashtableCleanupIterator(&iter);
-    }
-    kvstoreIteratorRelease(kvs_it);
-    conflatedRecomputeNextDue();
+/* Remove one nested pattern->channel entry and account the table shrink. The
+ * entry destructor subtracts the struct, the channel name and the pattern
+ * entry gauge, and unlinks the slot from the queues. */
+static void conflatedPatternEntryDelete(client *c, conflatedSub *sub) {
+    dict *channels = sub->pattern_channels;
+    conflatedPatternSub *ps = sub->pattern_owner;
+    robj *channel = sub->channel;
+    serverAssert(ps != NULL);
+    size_t before = hashtableMemUsage(channels);
+    conflatedPatternTableSync(c, ps, before);
+    incrRefCount(channel); /* dictDelete drops the last reference to the key. */
+    int deleted = dictDelete(channels, channel);
+    decrRefCount(channel);
+    serverAssert(deleted == DICT_OK);
+    size_t after = hashtableMemUsage(channels);
+    conflatedPatternTableSync(c, ps, after);
 }
 
 /* Recycle a pattern channel entry that was already delivered. It costs no
  * payload bytes and is the cheapest way to make room for a new channel. */
 static int conflatedEvictNullPatternEntry(client *c) {
-    dictIterator *pdi = dictGetIterator(c->pubsub_data->conflated_patterns);
-    dictEntry *pde;
-    while ((pde = dictNext(pdi)) != NULL) {
-        conflatedPatternSub *ps = dictGetVal(pde);
-        dict *channels = ps->channels;
-        dictIterator *cdi = dictGetSafeIterator(channels);
-        dictEntry *cde;
-        while ((cde = dictNext(cdi)) != NULL) {
-            conflatedSub *sub = dictGetVal(cde);
-            if (sub->payload != NULL) continue;
-            dictDelete(channels, dictGetKey(cde));
-            conflatedAccountPatternEntry(c, 0);
-            server.pubsub_conflated_evicted++;
-            dictReleaseIterator(cdi);
-            dictReleaseIterator(pdi);
-            return 1;
-        }
-        dictReleaseIterator(cdi);
-    }
-    dictReleaseIterator(pdi);
-    return 0;
+    conflatedSub *sub = c->pubsub_data->conflated_null_head;
+    if (sub == NULL) return 0;
+    serverAssert(sub->kind == CONFLATED_KIND_PATTERN && sub->payload == NULL);
+    conflatedPatternEntryDelete(c, sub);
+    server.pubsub_conflated_evicted++;
+    return 1;
 }
 
 /* Evict the pending value with the oldest due time. Exact subscriptions stay
  * (only their pending value is cleared); pattern channel entries are removed
  * entirely. `protect` is the entry being updated by the caller and must not be
- * freed under it: when it is the victim, only its payload is cleared. */
+ * freed under it: when it is the victim, only its payload is cleared. The
+ * client pending queue is ordered by due, so the head is the oldest value. */
 static int conflatedEvictOldest(client *c, int protect_pattern, conflatedSub *protect) {
-    mstime_t oldest = LLONG_MAX;
-    int kind = 0; /* 0 none, 1 exact, 2 pattern, 3 shard */
-    conflatedSub *victim = NULL;
-    robj *victim_channel = NULL;
-    dict *victim_channels = NULL;
+    conflatedSub *victim = c->pubsub_data->conflated_pending_head;
+    if (victim == NULL) return 0;
 
-    dictIterator *di = dictGetIterator(c->pubsub_data->conflated_channels);
-    dictEntry *de;
-    while ((de = dictNext(di)) != NULL) {
-        conflatedSub *sub = dictGetVal(de);
-        if (sub->payload != NULL && sub->due < oldest) {
-            oldest = sub->due;
-            kind = 1;
-            victim = sub;
-        }
-    }
-    dictReleaseIterator(di);
-
-    dictIterator *pdi = dictGetIterator(c->pubsub_data->conflated_patterns);
-    dictEntry *pde;
-    while ((pde = dictNext(pdi)) != NULL) {
-        conflatedPatternSub *ps = dictGetVal(pde);
-        dict *channels = ps->channels;
-        dictIterator *cdi = dictGetIterator(channels);
-        dictEntry *cde;
-        while ((cde = dictNext(cdi)) != NULL) {
-            conflatedSub *sub = dictGetVal(cde);
-            if (sub->payload != NULL && sub->due < oldest) {
-                oldest = sub->due;
-                kind = 2;
-                victim = sub;
-                victim_channel = dictGetKey(cde);
-                victim_channels = channels;
-            }
-        }
-        dictReleaseIterator(cdi);
-    }
-    dictReleaseIterator(pdi);
-
-    dictIterator *sdi = dictGetIterator(c->pubsub_data->conflated_shard_channels);
-    dictEntry *sde;
-    while ((sde = dictNext(sdi)) != NULL) {
-        conflatedSub *sub = dictGetVal(sde);
-        if (sub->payload != NULL && sub->due < oldest) {
-            oldest = sub->due;
-            kind = 3;
-            victim = sub;
-        }
-    }
-    dictReleaseIterator(sdi);
-
-    if (kind == 0) return 0;
+    int kind = victim->kind;
     conflatedClearPayload(c, victim);
-    if (kind == 2 && !(protect_pattern && victim == protect)) {
-        dictDelete(victim_channels, victim_channel);
-        conflatedAccountPatternEntry(c, 0);
+    if (kind == CONFLATED_KIND_PATTERN && !(protect_pattern && victim == protect)) {
+        conflatedPatternEntryDelete(c, victim);
     }
     server.pubsub_conflated_evicted++;
     return 1;
@@ -654,6 +713,45 @@ void pubsubDefragConflatedServer(void) {
     dictReleaseIterator(di);
 }
 
+/* Update the queue links after active defrag moved a subscription struct. The
+ * copy already carries the same prev/next pointers and queue bits; this
+ * function only points the neighbours and the queue heads at the new address. */
+static void conflatedRelinkSub(conflatedSub *sub) {
+    client *c = sub->owner;
+    serverAssert(c != NULL && c->pubsub_data != NULL);
+    ClientPubSubData *pd = c->pubsub_data;
+
+    if (sub->queue & CONFLATED_QUEUE_PENDING) {
+        if (sub->prev)
+            sub->prev->next = sub;
+        else
+            pd->conflated_pending_head = sub;
+        if (sub->next)
+            sub->next->prev = sub;
+        else
+            pd->conflated_pending_tail = sub;
+    } else if (sub->queue & CONFLATED_QUEUE_NULL) {
+        if (sub->prev)
+            sub->prev->next = sub;
+        else
+            pd->conflated_null_head = sub;
+        if (sub->next)
+            sub->next->prev = sub;
+        else
+            pd->conflated_null_tail = sub;
+    }
+    if (sub->queue & CONFLATED_QUEUE_GLOBAL) {
+        if (sub->gprev)
+            sub->gprev->gnext = sub;
+        else
+            server.pubsub_conflated_pending_head = sub;
+        if (sub->gnext)
+            sub->gnext->gprev = sub;
+        else
+            server.pubsub_conflated_pending_tail = sub;
+    }
+}
+
 /* Defrag one client's conflated tables, including nested pattern channel
  * tables. */
 void pubsubDefragConflatedClient(client *c) {
@@ -673,7 +771,12 @@ void pubsubDefragConflatedClient(client *c) {
         conflatedSub *sub = dictGetVal(cde);
         defragStringObjectSds(sub->payload);
         conflatedSub *new_sub = activeDefragAlloc(sub);
-        if (new_sub) dictSetVal(c->pubsub_data->conflated_channels, cde, new_sub);
+        if (new_sub) {
+            dictSetVal(c->pubsub_data->conflated_channels, cde, new_sub);
+            sub = new_sub;
+            conflatedRelinkSub(sub);
+        }
+        sub->channel = dictGetKey(cde);
     }
     dictReleaseIterator(cdi);
 
@@ -683,7 +786,12 @@ void pubsubDefragConflatedClient(client *c) {
         conflatedSub *sub = dictGetVal(cde);
         defragStringObjectSds(sub->payload);
         conflatedSub *new_sub = activeDefragAlloc(sub);
-        if (new_sub) dictSetVal(c->pubsub_data->conflated_shard_channels, cde, new_sub);
+        if (new_sub) {
+            dictSetVal(c->pubsub_data->conflated_shard_channels, cde, new_sub);
+            sub = new_sub;
+            conflatedRelinkSub(sub);
+        }
+        sub->channel = dictGetKey(cde);
     }
     dictReleaseIterator(cdi);
 
@@ -707,7 +815,15 @@ void pubsubDefragConflatedClient(client *c) {
             conflatedSub *sub = dictGetVal(pde);
             defragStringObjectSds(sub->payload);
             conflatedSub *new_sub = activeDefragAlloc(sub);
-            if (new_sub) dictSetVal(ps->channels, pde, new_sub);
+            if (new_sub) {
+                dictSetVal(ps->channels, pde, new_sub);
+                sub = new_sub;
+                conflatedRelinkSub(sub);
+            }
+            sub->pattern = dictGetKey(de);
+            sub->channel = dictGetKey(pde);
+            sub->pattern_channels = ps->channels;
+            sub->pattern_owner = ps;
         }
         dictReleaseIterator(pdi);
     }
@@ -746,6 +862,11 @@ void initClientPubSubData(client *c) {
     c->pubsub_data->conflated_pending_bytes = 0;
     c->pubsub_data->conflated_pending_slots = 0;
     c->pubsub_data->conflated_pattern_entries = 0;
+    c->pubsub_data->conflated_overhead_mem = 0;
+    c->pubsub_data->conflated_pending_head = NULL;
+    c->pubsub_data->conflated_pending_tail = NULL;
+    c->pubsub_data->conflated_null_head = NULL;
+    c->pubsub_data->conflated_null_tail = NULL;
     c->pubsub_data->pubsub_object_mem = 0;
     c->pubsub_data->client_tracking_redirection = 0;
     c->pubsub_data->client_tracking_prefixes = NULL;
@@ -761,6 +882,12 @@ void freeClientPubSubData(client *c) {
     pubsubUnsubscribeAllConflatedPatterns(c, 0);
     pubsubUnsubscribeAllConflatedShardChannels(c, 0);
     unmarkClientAsPubSub(c);
+    serverAssert(c->pubsub_data->conflated_pending_bytes == 0);
+    serverAssert(c->pubsub_data->conflated_pending_slots == 0);
+    serverAssert(c->pubsub_data->conflated_pattern_entries == 0);
+    serverAssert(c->pubsub_data->conflated_overhead_mem == 0);
+    serverAssert(c->pubsub_data->conflated_pending_head == NULL);
+    serverAssert(c->pubsub_data->conflated_null_head == NULL);
     hashtableRelease(c->pubsub_data->pubsub_channels);
     c->pubsub_data->pubsub_channels = NULL;
     hashtableRelease(c->pubsub_data->pubsub_patterns);
@@ -994,10 +1121,9 @@ int pubsubSubscribeConflatedChannel(client *c, robj *channel, long long interval
     int added = 0;
     conflatedSub *sub = dictFetchValue(c->pubsub_data->conflated_channels, channel);
     if (sub == NULL) {
-        sub = zmalloc(sizeof(*sub));
-        sub->interval_ms = interval_ms;
-        sub->due = 0;
-        sub->payload = NULL;
+        sub = conflatedSubCreate(c, interval_ms, CONFLATED_KIND_EXACT);
+        sub->channel = channel;
+        conflatedAccountMemory(c, getStringObjectMemory(channel), 1);
         serverAssert(dictAdd(c->pubsub_data->conflated_channels, channel, sub) == DICT_OK);
         incrRefCount(channel);
 
@@ -1077,9 +1203,8 @@ int pubsubSubscribeConflatedPattern(client *c, robj *pattern, long long interval
     int added = 0;
     conflatedPatternSub *ps = dictFetchValue(c->pubsub_data->conflated_patterns, pattern);
     if (ps == NULL) {
-        ps = zmalloc(sizeof(*ps));
-        ps->interval_ms = interval_ms;
-        ps->channels = dictCreate(&conflatedSubDictType);
+        ps = conflatedPatternSubCreate(c, interval_ms);
+        conflatedAccountMemory(c, getStringObjectMemory(pattern), 1);
         serverAssert(dictAdd(c->pubsub_data->conflated_patterns, pattern, ps) == DICT_OK);
         incrRefCount(pattern);
 
@@ -1106,18 +1231,6 @@ int pubsubUnsubscribeConflatedPattern(client *c, robj *pattern, int notify) {
     if (!c->pubsub_data) initClientPubSubData(c);
 
     int deleted = 0;
-    conflatedPatternSub *ps = dictFetchValue(c->pubsub_data->conflated_patterns, pattern);
-    dict *channels = ps ? ps->channels : NULL;
-    if (channels != NULL) {
-        dictIterator *cdi = dictGetSafeIterator(channels);
-        dictEntry *cde;
-        while ((cde = dictNext(cdi)) != NULL) {
-            conflatedSub *sub = dictGetVal(cde);
-            if (sub->payload != NULL) conflatedClearPayload(c, sub);
-            conflatedAccountPatternEntry(c, 0);
-        }
-        dictReleaseIterator(cdi);
-    }
     incrRefCount(pattern); /* dictDelete may drop the last ref to the key. */
     if (dictDelete(c->pubsub_data->conflated_patterns, pattern) == DICT_OK) {
         deleted = 1;
@@ -1168,11 +1281,6 @@ int pubsubSubscribeConflatedShardChannel(client *c, robj *channel, long long int
     int added = 0;
     conflatedSub *sub = dictFetchValue(c->pubsub_data->conflated_shard_channels, channel);
     if (sub == NULL) {
-        sub = zmalloc(sizeof(*sub));
-        sub->interval_ms = interval_ms;
-        sub->due = 0;
-        sub->payload = NULL;
-
         unsigned int slot = 0;
         if (server.cluster_enabled) slot = getCachedKeySlot(objectGetVal(channel));
 
@@ -1190,6 +1298,9 @@ int pubsubSubscribeConflatedShardChannel(client *c, robj *channel, long long int
             kvstoreHashtableInsertAtPosition(server.pubsub_conflated_shard_channels, slot, clients, &pos);
         }
 
+        sub = conflatedSubCreate(c, interval_ms, CONFLATED_KIND_SHARD);
+        sub->channel = channel;
+        conflatedAccountMemory(c, getStringObjectMemory(channel), 1);
         serverAssert(dictAdd(c->pubsub_data->conflated_shard_channels, channel, sub) == DICT_OK);
         incrRefCount(channel);
         serverAssert(hashtableAdd(clients, c));
@@ -1421,14 +1532,15 @@ int pubsubPublishConflatedChannel(robj *channel, robj *message) {
             decrRefCount(sub->payload);
             conflatedAccountPayload(c, old_bytes, 0);
             server.pubsub_conflated_replaced++;
+        } else {
+            serverAssert(!(sub->queue & (CONFLATED_QUEUE_PENDING | CONFLATED_QUEUE_NULL)));
+            sub->due = now + sub->interval_ms;
+            conflatedLocalQueueInsertDue(sub);
+            conflatedGlobalQueueInsert(sub);
         }
         sub->payload = message;
         incrRefCount(message);
         conflatedAccountPayload(c, new_bytes, 1);
-        if (!had_payload) {
-            sub->due = now + sub->interval_ms;
-            conflatedMarkDue(sub->due);
-        }
         receivers++;
     }
     hashtableCleanupIterator(&iter);
@@ -1466,14 +1578,15 @@ int pubsubPublishConflatedShardedChannel(robj *channel, robj *message, int slot)
             decrRefCount(sub->payload);
             conflatedAccountPayload(c, old_bytes, 0);
             server.pubsub_conflated_replaced++;
+        } else {
+            serverAssert(!(sub->queue & (CONFLATED_QUEUE_PENDING | CONFLATED_QUEUE_NULL)));
+            sub->due = now + sub->interval_ms;
+            conflatedLocalQueueInsertDue(sub);
+            conflatedGlobalQueueInsert(sub);
         }
         sub->payload = message;
         incrRefCount(message);
         conflatedAccountPayload(c, new_bytes, 1);
-        if (!had_payload) {
-            sub->due = now + sub->interval_ms;
-            conflatedMarkDue(sub->due);
-        }
         receivers++;
     }
     hashtableCleanupIterator(&iter);
@@ -1516,11 +1629,17 @@ int pubsubPublishConflatedPatterns(robj *channel, robj *message) {
                 continue;
             }
             if (new_entry) {
-                sub = zmalloc(sizeof(*sub));
-                sub->interval_ms = ps->interval_ms;
-                sub->due = 0;
-                sub->payload = NULL;
+                sub = conflatedSubCreate(c, ps->interval_ms, CONFLATED_KIND_PATTERN);
+                sub->pattern = pattern;
+                sub->channel = channel;
+                sub->pattern_channels = channels;
+                sub->pattern_owner = ps;
+                size_t before = hashtableMemUsage(channels);
+                conflatedPatternTableSync(c, ps, before);
                 serverAssert(dictAdd(channels, channel, sub) == DICT_OK);
+                size_t after = hashtableMemUsage(channels);
+                conflatedPatternTableSync(c, ps, after);
+                conflatedAccountMemory(c, getStringObjectMemory(channel), 1);
                 incrRefCount(channel);
                 conflatedAccountPatternEntry(c, 1);
             }
@@ -1530,14 +1649,17 @@ int pubsubPublishConflatedPatterns(robj *channel, robj *message) {
                 decrRefCount(sub->payload);
                 conflatedAccountPayload(c, old_bytes, 0);
                 server.pubsub_conflated_replaced++;
+            } else {
+                /* A delivered pattern entry waits in the null queue; a new
+                 * one is not queued yet. */
+                conflatedLocalQueueUnlink(sub);
+                sub->due = now + sub->interval_ms;
+                conflatedLocalQueueInsertDue(sub);
+                conflatedGlobalQueueInsert(sub);
             }
             sub->payload = message;
             incrRefCount(message);
             conflatedAccountPayload(c, new_bytes, 1);
-            if (!had_payload) {
-                sub->due = now + sub->interval_ms;
-                conflatedMarkDue(sub->due);
-            }
             receivers++;
         }
         hashtableCleanupIterator(&iter);
@@ -1546,133 +1668,56 @@ int pubsubPublishConflatedPatterns(robj *channel, robj *message) {
     return receivers;
 }
 
-/* Deliver pending conflated shard payloads as smessage frames. */
-static void pubsubConflatedShardCron(mstime_t now, size_t *budget) {
-    kvstoreIterator *kvs_it = kvstoreIteratorInit(server.pubsub_conflated_shard_channels, 0);
-    void *element;
-    while (kvstoreIteratorNext(kvs_it, &element) && *budget > 0) {
-        hashtable *clients = element;
-        robj *channel = *(robj **)hashtableMetadata(clients);
-        hashtableIterator iter;
-        hashtableInitIterator(&iter, clients, 0);
-        void *entry;
-        while (hashtableNext(&iter, &entry) && *budget > 0) {
-            client *c = entry;
-            if (c->pubsub_data == NULL) continue;
-            conflatedSub *sub = dictFetchValue(c->pubsub_data->conflated_shard_channels, channel);
-            if (sub == NULL || sub->payload == NULL || now < sub->due) continue;
-
-            robj *payload = sub->payload;
-            size_t bytes = conflatedPayloadBytes(payload);
-            sub->payload = NULL;
-            sub->due = 0;
-            addReplyPubsubMessage(c, channel, payload, shared.smessagebulk);
-            updateClientMemUsageAndBucket(c);
-            decrRefCount(payload);
-            conflatedAccountPayload(c, bytes, 0);
-            server.pubsub_conflated_delivered++;
-            (*budget)--;
-        }
-        hashtableCleanupIterator(&iter);
-    }
-    kvstoreIteratorRelease(kvs_it);
-}
-
-/* Deliver pending conflated pattern payloads. Each entry carries its own
- * concrete channel, so a pattern's channels are delivered independently. */
-static void pubsubConflatedPatternsCron(mstime_t now, size_t *budget) {
-    dictIterator *pdi = dictGetIterator(server.pubsub_conflated_patterns);
-    dictEntry *pde;
-    while ((pde = dictNext(pdi)) != NULL && *budget > 0) {
-        robj *pattern = dictGetKey(pde);
-        hashtable *clients = dictGetVal(pde);
-        hashtableIterator iter;
-        hashtableInitIterator(&iter, clients, 0);
-        void *entry;
-        while (hashtableNext(&iter, &entry) && *budget > 0) {
-            client *c = entry;
-            if (c->pubsub_data == NULL) continue;
-            conflatedPatternSub *ps = dictFetchValue(c->pubsub_data->conflated_patterns, pattern);
-            if (ps == NULL) continue;
-            dict *channels = ps->channels;
-
-            dictIterator *cdi = dictGetSafeIterator(channels);
-            dictEntry *cde;
-            while ((cde = dictNext(cdi)) != NULL && *budget > 0) {
-                robj *channel = dictGetKey(cde);
-                conflatedSub *sub = dictGetVal(cde);
-                if (sub->payload == NULL || now < sub->due) continue;
-
-                robj *payload = sub->payload;
-                size_t bytes = conflatedPayloadBytes(payload);
-                sub->payload = NULL;
-                sub->due = 0;
-                addReplyPubsubPatMessage(c, pattern, channel, payload);
-                updateClientMemUsageAndBucket(c);
-                decrRefCount(payload);
-                conflatedAccountPayload(c, bytes, 0);
-                server.pubsub_conflated_delivered++;
-                (*budget)--;
-            }
-            dictReleaseIterator(cdi);
-        }
-        hashtableCleanupIterator(&iter);
-    }
-    dictReleaseIterator(pdi);
-}
-
-/* Deliver every pending conflated payload whose due time has passed, up to the
- * configured budget. The dedicated timer continues the work on its next tick. */
+/* Deliver the pending values whose due time has passed, up to the configured
+ * budget. The server queue is ordered by due, so the timer visits only values
+ * that are actually due; an idle tick is O(1) even with millions of pending
+ * values. */
 void pubsubConflatedCron(void) {
     if (server.pubsub_conflated_interval_ms <= 0) return;
-    int has_channels = dictSize(server.pubsub_conflated_channels) > 0;
-    int has_patterns = dictSize(server.pubsub_conflated_patterns) > 0;
-    int has_shard = kvstoreSize(server.pubsub_conflated_shard_channels) > 0;
-    if (!has_channels && !has_patterns && !has_shard) return;
-
     size_t budget = (size_t)server.pubsub_conflated_flush_budget;
     if (budget == 0) budget = 1;
     mstime_t now = mstime();
 
-    /* With a known future due time, skip the full scan entirely. */
-    if (server.pubsub_conflated_next_due == LLONG_MAX) return;
-    if (server.pubsub_conflated_next_due != 0 && now < server.pubsub_conflated_next_due) return;
+    if (now < server.pubsub_conflated_next_due) return;
 
-    if (has_channels) {
-        dictIterator *di = dictGetIterator(server.pubsub_conflated_channels);
-        dictEntry *de;
-        while ((de = dictNext(di)) != NULL && budget > 0) {
-            robj *channel = dictGetKey(de);
-            hashtable *clients = dictGetVal(de);
-            hashtableIterator iter;
-            hashtableInitIterator(&iter, clients, 0);
-            void *entry;
-            while (hashtableNext(&iter, &entry) && budget > 0) {
-                client *c = entry;
-                if (c->pubsub_data == NULL) continue;
-                conflatedSub *sub = dictFetchValue(c->pubsub_data->conflated_channels, channel);
-                if (sub == NULL || sub->payload == NULL || now < sub->due) continue;
+    while (budget > 0) {
+        conflatedSub *sub = server.pubsub_conflated_pending_head;
+        if (sub == NULL || sub->due > now) break;
 
-                robj *payload = sub->payload;
-                size_t bytes = conflatedPayloadBytes(payload);
-                sub->payload = NULL;
-                sub->due = 0;
-                addReplyPubsubMessage(c, channel, payload, shared.messagebulk);
-                updateClientMemUsageAndBucket(c);
-                decrRefCount(payload);
-                conflatedAccountPayload(c, bytes, 0);
-                server.pubsub_conflated_delivered++;
-                budget--;
-            }
-            hashtableCleanupIterator(&iter);
-        }
-        dictReleaseIterator(di);
+        client *c = sub->owner;
+        robj *payload = sub->payload;
+        size_t bytes = conflatedPayloadBytes(payload);
+        robj *channel = sub->channel;
+        robj *pattern = sub->pattern;
+        int kind = sub->kind;
+        serverAssert(c != NULL && c->pubsub_data != NULL);
+        serverAssert(payload != NULL);
+
+        /* Unlink before replying: the slot must not be found by a cap check or
+         * another tick while the reply is being built. Delivered pattern
+         * entries go back to the recyclable null queue. */
+        sub->payload = NULL;
+        sub->due = 0;
+        conflatedGlobalQueueUnlink(sub);
+        conflatedLocalQueueUnlink(sub);
+        if (kind == CONFLATED_KIND_PATTERN) conflatedLocalQueuePushTail(sub, CONFLATED_QUEUE_NULL);
+
+        if (kind == CONFLATED_KIND_PATTERN)
+            addReplyPubsubPatMessage(c, pattern, channel, payload);
+        else
+            addReplyPubsubMessage(c, channel, payload,
+                                  kind == CONFLATED_KIND_SHARD ? shared.smessagebulk : shared.messagebulk);
+        updateClientMemUsageAndBucket(c);
+        decrRefCount(payload);
+        conflatedAccountPayload(c, bytes, 0);
+        server.pubsub_conflated_delivered++;
+        budget--;
     }
-
-    if (has_shard && budget > 0) pubsubConflatedShardCron(now, &budget);
-    if (has_patterns && budget > 0) pubsubConflatedPatternsCron(now, &budget);
-    if (budget == 0) server.pubsub_conflated_flush_truncated++;
-    conflatedRecomputeNextDue();
+    if (budget == 0 && server.pubsub_conflated_pending_head &&
+        server.pubsub_conflated_pending_head->due <= now)
+        server.pubsub_conflated_flush_truncated++;
+    server.pubsub_conflated_next_due =
+        server.pubsub_conflated_pending_head ? server.pubsub_conflated_pending_head->due : LLONG_MAX;
 }
 
 /* Dedicated delivery timer. Ticking at a quarter of the interval keeps the
@@ -1729,9 +1774,18 @@ static long long conflatedListContains(const char *list, const char *value) {
     while (1) {
         const char *comma = strchr(p, ',');
         size_t len = comma ? (size_t)(comma - p) : strlen(p);
-        long long interval = 0;
-        size_t name_len = conflatedEntryNameLen(p, len, &interval);
-        if (name_len == value_len && memcmp(p, value, name_len) == 0) return interval;
+        /* Whitespace around an entry is configuration formatting; spaces
+         * inside a name are significant. */
+        while (len > 0 && (p[0] == ' ' || p[0] == '\t')) {
+            p++;
+            len--;
+        }
+        while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t')) len--;
+        if (len > 0) {
+            long long interval = 0;
+            size_t name_len = conflatedEntryNameLen(p, len, &interval);
+            if (name_len == value_len && memcmp(p, value, name_len) == 0) return interval;
+        }
         if (comma == NULL) break;
         p = comma + 1;
     }
@@ -1746,12 +1800,19 @@ static long long conflatedListMatches(const char *list, robj *expression) {
     while (1) {
         const char *comma = strchr(p, ',');
         size_t len = comma ? (size_t)(comma - p) : strlen(p);
-        long long interval = 0;
-        size_t name_len = conflatedEntryNameLen(p, len, &interval);
-        if (name_len > 0 &&
-            stringmatchlen(p, (int)name_len, objectGetVal(decoded), (int)sdslen(objectGetVal(decoded)), 0)) {
-            result = interval;
-            break;
+        while (len > 0 && (p[0] == ' ' || p[0] == '\t')) {
+            p++;
+            len--;
+        }
+        while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t')) len--;
+        if (len > 0) {
+            long long interval = 0;
+            size_t name_len = conflatedEntryNameLen(p, len, &interval);
+            if (name_len > 0 &&
+                stringmatchlen(p, (int)name_len, objectGetVal(decoded), (int)sdslen(objectGetVal(decoded)), 0)) {
+                result = interval;
+                break;
+            }
         }
         if (comma == NULL) break;
         p = comma + 1;
@@ -2329,6 +2390,9 @@ size_t pubsubMemOverhead(client *c) {
     /* Pending payload bytes are client memory and must count for
      * maxmemory-clients / CLIENT LIST tot-mem. */
     mem += c->pubsub_data->conflated_pending_bytes;
+    /* Conflated subscription structs, channel/pattern names and nested pattern
+     * tables. */
+    mem += c->pubsub_data->conflated_overhead_mem;
     /* Account for channel/pattern name objects. A channel name robj
      * is shared (via refcount) by all its subscribers, but we attribute
      * it to each subscribing client so it stays visible to CLIENT INFO

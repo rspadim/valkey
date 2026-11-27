@@ -1376,4 +1376,8 @@ sds activeDefragSds(sds sdsptr) {
     return sdsptr;
 }
 
+void defragStringObjectSds(robj *ob) {
+    UNUSED(ob);
+}
+
 #endif

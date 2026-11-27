@@ -3242,7 +3242,9 @@ void initServer(void) {
     server.pubsub_conflated_dropped = 0;
     server.pubsub_conflated_evicted = 0;
     server.pubsub_conflated_flush_truncated = 0;
-    server.pubsub_conflated_next_due = 0;
+    server.pubsub_conflated_pending_head = NULL;
+    server.pubsub_conflated_pending_tail = NULL;
+    server.pubsub_conflated_next_due = LLONG_MAX;
     server.pubsubshard_channels = kvstoreCreate(&kvstoreChannelHashtableType, server.cluster_enabled ? CLUSTER_SLOT_MASK_BITS : 0,
                                                 KVSTORE_ALLOCATE_HASHTABLES_ON_DEMAND | KVSTORE_FREE_EMPTY_HASHTABLES);
     server.pubsub_clients = 0;

@@ -1299,6 +1299,8 @@ typedef struct ClientFlags {
 static_assert(sizeof(ClientFlags) <= sizeof(uint64_t) * 2,
               "ClientFlags exceeds 128 bits; add a new word or remove a flag");
 
+struct conflatedSub;
+
 typedef struct ClientPubSubData {
     hashtable *pubsub_channels;      /* channels a client is interested in (SUBSCRIBE) */
     hashtable *pubsub_patterns;      /* patterns a client is interested in (PSUBSCRIBE) */
@@ -1309,6 +1311,11 @@ typedef struct ClientPubSubData {
     size_t conflated_pending_bytes;        /* pending payload bytes held by this client */
     unsigned long long conflated_pending_slots; /* pending payload slots */
     unsigned long long conflated_pattern_entries; /* nested pattern->channel entries */
+    size_t conflated_overhead_mem;         /* structs, names and nested tables of conflated subs */
+    struct conflatedSub *conflated_pending_head; /* oldest pending value owned by this client */
+    struct conflatedSub *conflated_pending_tail;
+    struct conflatedSub *conflated_null_head; /* delivered pattern entries ready to recycle */
+    struct conflatedSub *conflated_null_tail;
     size_t pubsub_object_mem;        /* Memory used by channel/pattern name robj objects. */
     /* If this client is in tracking mode and this field is non zero,
      * invalidation messages for keys fetched by this client will be sent to
@@ -2463,7 +2470,9 @@ struct valkeyServer {
     unsigned long long pubsub_conflated_dropped;       /* # of incoming values dropped by a memory cap */
     unsigned long long pubsub_conflated_evicted;       /* # of pending entries evicted to make room */
     unsigned long long pubsub_conflated_flush_truncated; /* # of ticks that hit the flush budget */
-    mstime_t pubsub_conflated_next_due;                /* earliest pending due; 0 = unknown, LLONG_MAX = none */
+    struct conflatedSub *pubsub_conflated_pending_head; /* oldest pending value, ordered by due */
+    struct conflatedSub *pubsub_conflated_pending_tail;
+    mstime_t pubsub_conflated_next_due;                /* earliest pending due; LLONG_MAX = none */
     int pubsub_conflated_interval_ms;                  /* Delivery interval; 0 disables conflation */
     int pubsub_conflated_max_pending_bytes;            /* per-client pending payload byte cap; 0 = unlimited */
     int pubsub_conflated_max_total_pending_bytes;      /* global pending payload byte cap; 0 = unlimited */
